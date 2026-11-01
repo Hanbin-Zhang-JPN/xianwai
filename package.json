@@ -1,0 +1,22 @@
+{
+  "name": "xianwai",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "sync:ios": "node scripts/sync-ios.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "description": "弦外：基于聊天语境的中文沟通助手，支持微信截图识别、Codex 分析与回复建议。",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hanbin-Zhang-JPN/xianwai.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Hanbin-Zhang-JPN/xianwai/issues"
+  }
+}

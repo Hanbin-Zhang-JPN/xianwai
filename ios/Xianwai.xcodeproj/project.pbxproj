@@ -1,0 +1,31 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1; classes = {}; objectVersion = 56;
+ objects = {
+  A00000000000000000000001 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; TargetAttributes = {A00000000000000000000002 = {CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = A00000000000000000000003; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; hasScannedForEncodings = 0; knownRegions = (zh_CN, en, Base); mainGroup = A00000000000000000000004; productRefGroup = A00000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000002); };
+  A00000000000000000000002 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000006; buildPhases = (A00000000000000000000007,A00000000000000000000008,A00000000000000000000009); buildRules = (); dependencies = (); name = Xianwai; productName = Xianwai; productReference = A00000000000000000000010; productType = "com.apple.product-type.application"; };
+  A00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000020,A00000000000000000000021); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000011,A00000000000000000000005); sourceTree = "<group>"; };
+  A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000010); name = Products; sourceTree = "<group>"; };
+  A00000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000022,A00000000000000000000023); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A00000000000000000000007 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000031,A00000000000000000000032,A00000000000000000000033); runOnlyForDeploymentPostprocessing = 0; };
+  A00000000000000000000008 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  A00000000000000000000009 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000034); runOnlyForDeploymentPostprocessing = 0; };
+  A00000000000000000000010 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Xianwai.app; sourceTree = BUILT_PRODUCTS_DIR; };
+  A00000000000000000000011 = {isa = PBXGroup; path = Xianwai; sourceTree = "<group>"; children = (A00000000000000000000012,A00000000000000000000013,A00000000000000000000014,A00000000000000000000015,A00000000000000000000016); };
+  A00000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XianwaiApp.swift; sourceTree = "<group>"; };
+  A00000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XianwaiWebView.swift; sourceTree = "<group>"; };
+  A00000000000000000000014 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotRecognizer.swift; sourceTree = "<group>"; };
+  A00000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+  A00000000000000000000016 = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/Web; sourceTree = "<group>"; };
+  A00000000000000000000020 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; }; };
+  A00000000000000000000021 = {isa = XCBuildConfiguration; name = Release; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; };
+  A00000000000000000000022 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = com.example.xianwai; PRODUCT_NAME = "$(TARGET_NAME)"; INFOPLIST_FILE = Xianwai/Info.plist; CODE_SIGN_STYLE = Automatic; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; }; };
+  A00000000000000000000023 = {isa = XCBuildConfiguration; name = Release; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = com.example.xianwai; PRODUCT_NAME = "$(TARGET_NAME)"; INFOPLIST_FILE = Xianwai/Info.plist; CODE_SIGN_STYLE = Automatic; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; }; };
+  A00000000000000000000031 = {isa = PBXBuildFile; fileRef = A00000000000000000000012; };
+  A00000000000000000000032 = {isa = PBXBuildFile; fileRef = A00000000000000000000013; };
+  A00000000000000000000033 = {isa = PBXBuildFile; fileRef = A00000000000000000000014; };
+  A00000000000000000000034 = {isa = PBXBuildFile; fileRef = A00000000000000000000016; };
+ };
+ rootObject = A00000000000000000000001;
+}

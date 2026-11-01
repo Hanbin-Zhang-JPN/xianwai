@@ -1,0 +1,26 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tar.gz
+*.xcuserstate
+xcuserdata/
+DerivedData/
+output/
+
+# Private deployment identity and local runtime data
+.openai/
+*.app/
+*.ipa
+*.dmg
+*.zip
+*.log
+workspace.json
+workspace.json.*
+chat-fixture.png
+.envrc
+.auth/
+auth.json
+*.pem
+*.key

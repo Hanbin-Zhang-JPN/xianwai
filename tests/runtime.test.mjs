@@ -1,0 +1,24 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,rm,readFile,stat} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+test('paired runtime protects OCR and workspace and restores a saved conversation',async(t)=>{
+ const folder=await mkdtemp(path.join(os.tmpdir(),'xianwai-runtime-test-'));
+ const token='test-only-pairing-token-not-a-real-token-00000';
+ const child=spawn(process.execPath,['desktop/runtime-server.mjs'],{cwd:new URL('../',import.meta.url),env:{...process.env,XIANWAI_TOKEN:token,XIANWAI_PORT:'0',XIANWAI_DATA_DIR:folder,CODEX_BIN:'/not-installed-in-test',XIANWAI_OCR:''},stdio:['ignore','pipe','pipe']});
+ t.after(async()=>{child.kill();await rm(folder,{recursive:true,force:true});});
+ const ready=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('runtime timeout')),5000);child.stdout.on('data',c=>{try{const v=JSON.parse(String(c));if(v.event==='ready'){clearTimeout(timer);resolve(v);}}catch{}});child.on('error',reject);});
+ const url='http://127.0.0.1:'+ready.port,headers={Authorization:'Bearer '+token,'Content-Type':'application/json'};
+ assert.equal((await fetch(url+'/api/health')).status,401);
+ assert.equal((await fetch(url+'/api/ocr',{method:'POST',body:'{}'})).status,401);
+ let r=await fetch(url+'/api/health',{headers});assert.equal((await r.json()).provider,'codex');
+ const workspace={chats:[{id:'fake-chat',title:'测试',name:'对方',note:'虚构测试',messages:[{role:'partner',text:'你好'}]}],favorites:[]};
+ r=await fetch(url+'/api/workspace',{method:'POST',headers,body:JSON.stringify(workspace)});assert.equal(r.status,200);
+ r=await fetch(url+'/api/workspace',{headers});assert.deepEqual((await r.json()).workspace.chats[0].messages,workspace.chats[0].messages);
+ assert.equal((await stat(path.join(folder,'workspace.json'))).mode&0o777,0o600);
+ assert.ok(!(await readFile(path.join(folder,'workspace.json'),'utf8')).includes(token));
+ r=await fetch(url+'/api/workspace',{method:'DELETE',headers});assert.equal(r.status,200);
+ r=await fetch(url+'/api/workspace',{headers});assert.equal((await r.json()).workspace,null);
+});
