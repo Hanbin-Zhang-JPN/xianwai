@@ -53,7 +53,7 @@ final class XianwaiController: UIViewController, WKScriptMessageHandler, WKNavig
                 UIPasteboard.general.setItems([["public.utf8-plain-text": text]], options: [.localOnly: true])
             }
         case "export":
-            guard let text = body["text"] as? String, text.count <= 400_000 else { return }
+            guard let text = body["text"] as? String, text.count <= 8_000_000 else { return }
             let file = FileManager.default.temporaryDirectory.appendingPathComponent("Xianwai-\(UUID().uuidString).json")
             do { try text.write(to: file, atomically: true, encoding: .utf8) }
             catch { notify("无法生成导出文件，请稍后再试。"); return }
