@@ -14,9 +14,9 @@ test('paired runtime protects OCR and workspace and restores a saved conversatio
  assert.equal((await fetch(url+'/api/health')).status,401);
  assert.equal((await fetch(url+'/api/ocr',{method:'POST',body:'{}'})).status,401);
  let r=await fetch(url+'/api/health',{headers});assert.equal((await r.json()).provider,'codex');
- const workspace={chats:[{id:'fake-chat',title:'测试',name:'对方',note:'虚构测试',messages:[{role:'partner',text:'你好'}]}],favorites:[]};
+ const workspace={active:'fake-chat',chats:[{id:'fake-chat',title:'测试',name:'对方',note:'虚构测试',style:'不叫宝贝，句子短一点',preferredTone:'brief',messages:[{role:'partner',text:'你好'}]}],favorites:[]};
  r=await fetch(url+'/api/workspace',{method:'POST',headers,body:JSON.stringify(workspace)});assert.equal(r.status,200);
- r=await fetch(url+'/api/workspace',{headers});assert.deepEqual((await r.json()).workspace.chats[0].messages,workspace.chats[0].messages);
+ r=await fetch(url+'/api/workspace',{headers});const restored=(await r.json()).workspace;assert.deepEqual(restored.chats[0].messages,workspace.chats[0].messages);assert.equal(restored.active,'fake-chat');assert.equal(restored.chats[0].style,workspace.chats[0].style);assert.equal(restored.chats[0].preferredTone,'brief');
  assert.equal((await stat(path.join(folder,'workspace.json'))).mode&0o777,0o600);
  assert.ok(!(await readFile(path.join(folder,'workspace.json'),'utf8')).includes(token));
  r=await fetch(url+'/api/workspace',{method:'DELETE',headers});assert.equal(r.status,200);

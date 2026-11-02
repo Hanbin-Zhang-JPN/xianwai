@@ -18,6 +18,8 @@ final class Bridge: ObservableObject {
     private var token = ""
     private var port = 0
     private var started = false
+    private var tunnelAddress: String?
+    private var tunnelConnected = false
 
     func start() {
         guard !started else { return }; started = true
@@ -62,7 +64,7 @@ final class Bridge: ObservableObject {
 
     func startTunnel() {
         guard port > 0 else { return }
-        tunnel?.terminationHandler = nil; tunnel?.terminate(); phoneURL = nil; tunnelBuffer = ""; failed = false
+        tunnel?.terminationHandler = nil; tunnel?.terminate(); phoneURL = nil; tunnelBuffer = ""; failed = false; tunnelAddress = nil; tunnelConnected = false
         status = "真实 AI 已就绪，正在建立手机连接…"
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/cloudflared")
         process.arguments = ["tunnel", "--config", "/dev/null", "--url", "http://127.0.0.1:\(port)", "--no-autoupdate", "--protocol", "http2", "--metrics", "127.0.0.1:0"]
@@ -80,8 +82,11 @@ final class Bridge: ObservableObject {
     private func receiveTunnel(_ text: String) {
         tunnelBuffer = String((tunnelBuffer + text).suffix(12000))
         if let range = tunnelBuffer.range(of: "https://[a-z0-9-]+\\.trycloudflare\\.com", options: .regularExpression) {
-            let url = String(tunnelBuffer[range])
-            phoneURL = URL(string: "\(url)/#key=\(token)")
+            tunnelAddress = String(tunnelBuffer[range])
+        }
+        if text.contains("Registered tunnel connection") { tunnelConnected = true }
+        if tunnelConnected, let address = tunnelAddress {
+            phoneURL = URL(string: "\(address)/#key=\(token)")
             status = "已就绪。用 iPhone 相机扫描下方二维码。"
         } else if tunnelBuffer.contains("failed to request quick Tunnel") { status = "暂时连不上手机中转服务，可点击重新连接。"; failed = true }
     }
@@ -105,7 +110,11 @@ final class Bridge: ObservableObject {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var bridge: Bridge?
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { sender.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil) }
+        return true
+    }
     func applicationWillTerminate(_ notification: Notification) { bridge?.stop() }
 }
 
@@ -114,13 +123,13 @@ struct XianwaiMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var bridge = Bridge()
     var body: some Scene {
-        WindowGroup("弦外 · 你的聊天助手") {
+        Window("弦外 · 你的聊天助手", id: "control") {
             VStack(spacing: 17) {
                 HStack(spacing: 13) {
                     Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 29)).foregroundStyle(Color(red: 0.26, green: 0.37, blue: 0.27))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("弦外").font(.system(size: 29, weight: .medium, design: .serif))
-                        Text("截图放进来，帮你把话接下去。 ").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("粘贴一句就帮你回，关窗也能继续用。").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Circle().fill(bridge.aiReady ? Color.green.opacity(0.65) : Color.gray).frame(width: 7, height: 7)
@@ -140,13 +149,29 @@ struct XianwaiMacApp: App {
                 }
                 VStack(alignment: .leading, spacing: 9) {
                     Text("1   iPhone 扫码 → 用 Safari 打开，确认连接 Mac")
-                    Text("2   导入微信截图 → 核对 → 长按一句 → 复制回复")
+                    Text("2   日常：粘贴对方一句 → 帮我回 → 编辑复制")
                     Text("3   Safari 分享 → 添加到主屏幕，下次像 App 一样打开")
                 }.font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(16).background(Color.white.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 10))
-                Text("保持 Mac 开机联网；关闭此窗口会结束连接，重新打开后需重新扫码。\n手机连接通过 Cloudflare HTTPS 中转；截图在 Mac 识别，分析文字发送给 OpenAI。\n请勿转发配对链接。分析使用当前 Codex 账户额度。").font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(4).multilineTextAlignment(.center)
+                Text("关闭窗口仍在后台运行，可从屏幕顶部菜单栏重新打开。\n只有从菜单退出、Mac 合盖或断网才会中断连接。\n截图通过 Cloudflare 到 Mac 识别，分析文字发送给 OpenAI；使用当前 Codex 额度。\n请勿转发二维码和配对链接。").font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(4).multilineTextAlignment(.center)
             }
             .padding(28).frame(width: 570).background(Color(red: 0.96, green: 0.97, blue: 0.94))
             .task { delegate.bridge = bridge; bridge.start() }
         }.windowResizability(.contentSize)
+        MenuBarExtra("弦外", systemImage: "bubble.left.and.bubble.right") {
+            BridgeMenu(bridge: bridge)
+        }
+    }
+}
+
+struct BridgeMenu: View {
+    @ObservedObject var bridge: Bridge
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("显示二维码与连接状态") { openWindow(id: "control"); NSApp.activate(ignoringOtherApps: true) }
+        Button("打开 Mac 工作台") { bridge.openWorkbench() }.disabled(bridge.localURL == nil)
+        Button("复制手机链接") { bridge.copyPhoneLink() }.disabled(bridge.phoneURL == nil)
+        Divider()
+        Text(bridge.aiReady ? "Codex 已就绪 · 后台运行中" : "Codex 尚未就绪")
+        Button("退出弦外并关闭连接") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }

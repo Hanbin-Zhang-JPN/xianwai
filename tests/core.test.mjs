@@ -20,7 +20,7 @@ test('a reply uses all preceding messages and excludes later messages',()=>{
 });
 test('local mode identifies uncertainty, changes tone and handles own messages',()=>{
  const rows=[{role:'me',text:'我晚一点到'},{role:'partner',text:'算了，你忙吧。'}];
- const warm=localAnalysis(rows,1,'warm'),brief=localAnalysis(rows,1,'brief');assert.equal(warm.mode,'local');assert.match(warm.hypotheses[1].text,/也可能/);assert.notDeepEqual(warm.replies,brief.replies);assert.equal(warm.contextCount,2);assert.match(localAnalysis(rows,0).feeling,/不能/);
+ const warm=localAnalysis(rows,1,'warm'),brief=localAnalysis(rows,1,'brief');assert.equal(warm.mode,'local');assert.match(warm.hypotheses[1].text,/也可能/);assert.deepEqual(warm.replies,brief.replies);assert.equal(warm.replies[2].tone,'brief');assert.ok(warm.replies[2].text.length<warm.replies[0].text.length);assert.equal(warm.contextCount,2);assert.match(localAnalysis(rows,0).feeling,/不能/);
 });
 test('explicit boundaries and safety signals take precedence over ordinary advice',()=>{
  assert.match(localAnalysis([{role:'partner',text:'不要再联系我了'}],0).title,/边界/);

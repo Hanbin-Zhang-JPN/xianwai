@@ -55,8 +55,8 @@ export function localAnalysis(messages, targetIndex, tone = 'warm') {
   open:{title:'先听明白，再往下聊',feeling:'目前没有足够线索判断明确的情绪',need:'围绕她说的具体事情接话，用开放问题补充语境',other:'她可能是在陈述事实、开玩笑或开启话题；还需要更多上下文。',ask:'你说这件事的时候，最在意的是什么？',avoid:'不要把每一句普通消息都解读成试探或考验。',replies:['我想再听你说说，这件事里你最在意的是什么？','我在听，后来呢？','你希望我先听你说，还是一起想想接下来怎么办？']},
   self:{title:'让自己的意思更容易被听见',feeling:'这是你发出的消息，不能用它确定对方的感受',need:'确认自己的表达有没有把事实、感受和请求说清楚',other:'要理解对方，最好选择她的原话，并结合之前的交流。',ask:'我刚才的表达，你听起来是什么感觉？',avoid:'避免替对方定义情绪，或要求她马上接受你的解释。',replies:['我想把刚才的意思说清楚，也想听听你是怎么理解的。','刚才我可能说得太简略了。你愿意告诉我你的感受吗？','我先把自己的情况说清楚，再听听你的想法，好吗？']}
  };
- const p=profiles[kind], order=tone==='brief'?[2,0,1]:tone==='honest'?[0,2,1]:[1,0,2];
+ const p=profiles[kind];
  const short={distance:gap?['我在。你想聊一会儿，还是先休息？','刚才让你等了，抱歉。现在想聊聊吗？','好，你先按自己的节奏来。']:['我在。你想聊一会儿，还是先休息？','我有点拿不准，你是想先歇会儿吗？','好，你先按自己的节奏来。'],tired:['今天辛苦了。想说说吗？我听着。','我在，慢慢说。','你想让我陪着，还是帮点忙？'],promise:['我想听清楚：哪一部分让你最难受？','是我没做到之前约好的事吗？','我们一起商量个能落实的办法吧。'],affection:['看到这条消息，我也很开心。','收到啦，我很珍惜。','我也想听你说说今天。'],open:['我在听，后来呢？','这件事你最在意什么？','你想聊聊，还是一起想办法？'],self:['我想说清楚，也想听听你的理解。','刚才说得简略了，你是什么感受？','我先说情况，再听你的想法，好吗？']};
- const texts=tone==='brief'&&short[kind]?short[kind]:p.replies;
- return {mode:'local',title:p.title,feeling:p.feeling,need:p.need,hypotheses:[{text:p.feeling,evidence:[target.id]},{text:p.other,evidence:[target.id]}],facts:[{text:`${target.role==='me'?'你':'对方'}说：“${t}”`,evidence:[target.id]},...(previous?[{text:`此前你说：“${previous.text}”`,evidence:[previous.id]}]:[])],question:p.ask,avoid:p.avoid,replies:order.map((i,n)=>({label:['自然接话','多一点关心','留一点空间'][n],text:texts[i],reason:n===0?'用你平时说话的方式，调整后再发送。':n===1?'先表达在意，再给对方选择。':'允许对方按自己的节奏回应。'})),contextCount:context.length};
+ const variants=[p.replies[1],p.replies[0],short[kind]?.[2]||p.replies[2]];
+ return {mode:'local',title:p.title,feeling:p.feeling,need:p.need,hypotheses:[{text:p.feeling,evidence:[target.id]},{text:p.other,evidence:[target.id]}],facts:[{text:`${target.role==='me'?'你':'对方'}说：“${t}”`,evidence:[target.id]},...(previous?[{text:`此前你说：“${previous.text}”`,evidence:[previous.id]}]:[])],question:p.ask,avoid:p.avoid,replies:variants.map((text,i)=>({tone:['warm','honest','brief'][i],label:['温柔一点','坦诚一点','简短一点'][i],text,reason:'结合自己的真实情况调整后，再复制发送。'})),contextCount:context.length};
 }

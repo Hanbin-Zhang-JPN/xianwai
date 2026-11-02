@@ -35,22 +35,22 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='POST'){
      const input=await body(req,3000000);
      if(!Array.isArray(input.chats)||input.chats.length>15||!Array.isArray(input.favorites)||input.favorites.length>300)throw new Error('备份格式或数量不正确。');
-     const chats=input.chats.map(c=>{if(!c||typeof c.id!=='string'||c.id.length>100||typeof c.title!=='string'||c.title.length>30||typeof c.name!=='string'||c.name.length>20||typeof c.note!=='string'||c.note.length>2000||!Array.isArray(c.messages))throw new Error('对话信息不正确。');return{id:c.id,title:c.title,name:c.name,note:c.note,subtitle:typeof c.subtitle==='string'?c.subtitle.slice(0,100):'',messages:c.messages.length?validateMessages(c.messages):[]};});
+     const chats=input.chats.map(c=>{if(!c||typeof c.id!=='string'||c.id.length>100||typeof c.title!=='string'||c.title.length>30||typeof c.name!=='string'||c.name.length>20||typeof c.note!=='string'||c.note.length>2000||!Array.isArray(c.messages)||(c.style!==undefined&&(typeof c.style!=='string'||c.style.length>1000)))throw new Error('对话信息不正确。');return{id:c.id,title:c.title,name:c.name,note:c.note,style:c.style||'',preferredTone:['warm','honest','brief'].includes(c.preferredTone)?c.preferredTone:'warm',subtitle:typeof c.subtitle==='string'?c.subtitle.slice(0,100):'',messages:c.messages.length?validateMessages(c.messages):[]};});
      const favorites=input.favorites.map(f=>{if(typeof f.id!=='string'||typeof f.text!=='string'||f.text.length>2000)throw new Error('收藏格式不正确。');return{id:f.id.slice(0,100),text:f.text,label:String(f.label||'').slice(0,100),name:String(f.name||'').slice(0,100),source:String(f.source||'').slice(0,100)};});
-     const temporary=workspaceFile+'.'+randomUUID()+'.tmp';await mkdir(dataDirectory,{recursive:true,mode:0o700});await writeFile(temporary,JSON.stringify({chats,favorites,savedAt:Date.now()}),{mode:0o600});await rename(temporary,workspaceFile);send(res,200,{saved:true});return;
+     const temporary=workspaceFile+'.'+randomUUID()+'.tmp';await mkdir(dataDirectory,{recursive:true,mode:0o700});await writeFile(temporary,JSON.stringify({active:chats.some(c=>c.id===input.active)?input.active:chats[0]?.id||null,chats,favorites,savedAt:Date.now()}),{mode:0o600});await rename(temporary,workspaceFile);send(res,200,{saved:true});return;
     }
    }
    if(url.pathname==='/api/analyze'&&req.method==='POST'){
     if(!ready){send(res,503,{error:'请先在这台 Mac 的 ChatGPT 应用中登录 Codex。'});return;}
     if(active){send(res,429,{error:'还有一条消息正在分析，请等它完成或取消后再试。'});return;}
     const input=await body(req);contextFor(input.messages,input.targetIndex);
-    if(!['warm','honest','brief'].includes(input.tone)||typeof input.note!=='string'||input.note.length>2000)throw new Error('语气或背景格式不正确。');
+    if(!['warm','honest','brief'].includes(input.tone)||typeof input.note!=='string'||input.note.length>2000||(input.style!==undefined&&(typeof input.style!=='string'||input.style.length>1000)))throw new Error('语气或背景格式不正确。');
     for(const [id,job] of jobs)if(Date.now()-job.created>600000)jobs.delete(id);
     const id=randomUUID(),controller=new AbortController(),job={created:Date.now(),status:'running',controller};jobs.set(id,job);active=id;
-    analyzeWithCodex(input,{signal:controller.signal}).then(result=>{job.status='completed';job.result=result;}).catch(error=>{job.status='failed';job.error=error.message;}).finally(()=>{if(active===id)active=null;});
+    job.finished=analyzeWithCodex(input,{signal:controller.signal}).then(result=>{job.status='completed';job.result=result;}).catch(error=>{job.status='failed';job.error=error.message;}).finally(()=>{if(active===id)active=null;});
     send(res,202,{jobId:id,status:'running'});return;
    }
-   if(url.pathname.startsWith('/api/jobs/')){const id=url.pathname.slice(10),job=jobs.get(id);if(!job){send(res,404,{error:'这次分析已过期，请重新选择消息。'});return;}if(req.method==='DELETE'){job.controller.abort();send(res,200,{status:'cancelled'});return;}if(req.method==='GET'){send(res,200,{status:job.status,...(job.result?{result:job.result}:{}),...(job.error?{error:job.error}:{})});return;}}
+   if(url.pathname.startsWith('/api/jobs/')){const id=url.pathname.slice(10),job=jobs.get(id);if(!job){send(res,404,{error:'这次分析已过期，请重新选择消息。'});return;}if(req.method==='DELETE'){job.controller.abort();await job.finished;send(res,200,{status:'cancelled'});return;}if(req.method==='GET'){send(res,200,{status:job.status,...(job.result?{result:job.result}:{}),...(job.error?{error:job.error}:{})});return;}}
    if(url.pathname==='/api/ocr'&&req.method==='POST'){
     if(!process.env.XIANWAI_OCR){send(res,503,{error:'本机截图识别尚未准备好。'});return;}
     const input=await body(req,6500000),match=typeof input.dataUrl==='string'&&input.dataUrl.match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/);
