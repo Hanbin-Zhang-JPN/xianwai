@@ -50,3 +50,10 @@ test('clear waits for in-flight save then uses its revision; conflicts stop furt
  assert.deepEqual(calls.map(c=>[c.method,c.body.baseRevision]),[['POST',4],['DELETE',5]]);sync.disconnect();
  let errors=0,count=0;const conflict=createWorkspaceSync({fetcher:async()=>{count++;return json({error:'已更新'},409);},onError:()=>errors++});conflict.connect({endpoint:'',token:'fake',revision:0});conflict.schedule(workspace('旧'));await conflict.flush();conflict.schedule(workspace('再旧'));await conflict.flush();assert.equal(errors,1);assert.equal(count,1);await assert.rejects(conflict.clear(),/冲突/);conflict.disconnect();
 });
+
+test('request deadlines and caller cancellation work without AbortSignal.any',async()=>{
+ const {withRequestTimeout}=await import('../dist/workspace-sync.js');
+ const waitForAbort=signal=>new Promise((resolve,reject)=>{const fail=()=>reject(new DOMException('cancel','AbortError'));if(signal.aborted)fail();else signal.addEventListener('abort',fail,{once:true});});
+ await assert.rejects(withRequestTimeout(waitForAbort,undefined,5),{name:'AbortError'});
+ const controller=new AbortController(),pending=withRequestTimeout(waitForAbort,controller.signal);controller.abort();await assert.rejects(pending,{name:'AbortError'});
+});

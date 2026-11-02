@@ -1,5 +1,13 @@
 import {normalizeWorkspace} from './workspace.js';
 
+// Use AbortController directly so older iPhone WebKit versions need no AbortSignal.any.
+export async function withRequestTimeout(operation,signal,milliseconds=12000){
+ const controller=new AbortController(),abort=()=>controller.abort();
+ if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+ const timer=setTimeout(()=>controller.abort(),milliseconds);
+ try{return await operation(controller.signal);}finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+}
+
 export function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onError=()=>{}}={}){
  let session=null;
  async function read(response){
@@ -18,7 +26,7 @@ export function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700
   const payload=scope.pending;scope.pending=null;if(!payload)return scope.running;
   scope.running=scope.running.then(async()=>{
    if(session!==scope||scope.blocked||scope.clearing)return;
-   try{const value=await read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));if(session===scope)scope.revision=value.revision;}
+   try{const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
    catch(error){if(session!==scope||scope.controller.signal.aborted)return;scope.blocked=true;scope.pending=null;onError(error);}
   });
   return scope.running;
@@ -34,7 +42,7 @@ export function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700
    await scope.running;
    if(session!==scope)throw new Error('连接已变更，未删除 Mac 备份。');
    if(scope.blocked)throw new Error('Mac 备份存在冲突或连接异常，请重新配对后再清除。');
-   const value=await read(await fetcher(scope.base+'/api/workspace',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));
+   const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({baseRevision:scope.revision}),signal})),scope.controller.signal);
    if(session!==scope)throw new Error('连接已变更。');scope.revision=value.revision;return value;
   }catch(error){scope.blocked=true;throw error;}finally{scope.clearing=false;}
  }

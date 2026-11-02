@@ -241,6 +241,14 @@ function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=70
 const analysisClient=createAnalysisClient();
 
 
+// Use AbortController directly so older iPhone WebKit versions need no AbortSignal.any.
+async function withRequestTimeout(operation,signal,milliseconds=12000){
+ const controller=new AbortController(),abort=()=>controller.abort();
+ if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+ const timer=setTimeout(()=>controller.abort(),milliseconds);
+ try{return await operation(controller.signal);}finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+}
+
 function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onError=()=>{}}={}){
  let session=null;
  async function read(response){
@@ -259,7 +267,7 @@ function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onErro
   const payload=scope.pending;scope.pending=null;if(!payload)return scope.running;
   scope.running=scope.running.then(async()=>{
    if(session!==scope||scope.blocked||scope.clearing)return;
-   try{const value=await read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));if(session===scope)scope.revision=value.revision;}
+   try{const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
    catch(error){if(session!==scope||scope.controller.signal.aborted)return;scope.blocked=true;scope.pending=null;onError(error);}
   });
   return scope.running;
@@ -275,7 +283,7 @@ function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onErro
    await scope.running;
    if(session!==scope)throw new Error('连接已变更，未删除 Mac 备份。');
    if(scope.blocked)throw new Error('Mac 备份存在冲突或连接异常，请重新配对后再清除。');
-   const value=await read(await fetcher(scope.base+'/api/workspace',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));
+   const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({baseRevision:scope.revision}),signal})),scope.controller.signal);
    if(session!==scope)throw new Error('连接已变更。');scope.revision=value.revision;return value;
   }catch(error){scope.blocked=true;throw error;}finally{scope.clearing=false;}
  }
@@ -294,7 +302,7 @@ function startCompanion(api){
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
  const localWorkspace=()=>{const s=getState();return {active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw new Error(result?.error||'请求失败。');return result;};
- const query=(pair,path,signal)=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal}).then(readJSON);
+ const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
  const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}};
  const forget=()=>{for(const storage of [localStorage,sessionStorage])try{storage.removeItem('xianwai-connection-v1');}catch{}};
  function rememberPair(pair,remember){forget();try{(remember?localStorage:sessionStorage).setItem('xianwai-connection-v1',JSON.stringify({...pair,live:getState().live}));}catch{toast('浏览器未允许记住连接，下次需重新扫码。');}}
@@ -387,7 +395,7 @@ function startCompanion(api){
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
   if(!candidate.persist){sync.disconnect();return;}
-  if(connected&&!s.persist){const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',AbortSignal.any([signal,AbortSignal.timeout(12000)]));if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+  if(connected&&!s.persist){const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));

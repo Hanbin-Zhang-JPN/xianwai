@@ -1,5 +1,5 @@
 import {analysisClient} from './analysis-client.js';
-import {createWorkspaceSync} from './workspace-sync.js';
+import {createWorkspaceSync,withRequestTimeout} from './workspace-sync.js';
 import {mergeWorkspaces} from './workspace.js';
 
 export const requestAnalysis=options=>analysisClient.request(options);
@@ -13,7 +13,7 @@ export function startCompanion(api){
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
  const localWorkspace=()=>{const s=getState();return {active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw new Error(result?.error||'请求失败。');return result;};
- const query=(pair,path,signal)=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal}).then(readJSON);
+ const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
  const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}};
  const forget=()=>{for(const storage of [localStorage,sessionStorage])try{storage.removeItem('xianwai-connection-v1');}catch{}};
  function rememberPair(pair,remember){forget();try{(remember?localStorage:sessionStorage).setItem('xianwai-connection-v1',JSON.stringify({...pair,live:getState().live}));}catch{toast('浏览器未允许记住连接，下次需重新扫码。');}}
@@ -106,7 +106,7 @@ export function startCompanion(api){
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
   if(!candidate.persist){sync.disconnect();return;}
-  if(connected&&!s.persist){const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',AbortSignal.any([signal,AbortSignal.timeout(12000)]));if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+  if(connected&&!s.persist){const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));
