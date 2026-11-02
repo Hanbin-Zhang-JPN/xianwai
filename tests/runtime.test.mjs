@@ -16,12 +16,12 @@ test('paired runtime protects OCR and workspace and restores a saved conversatio
  let r=await fetch(url+'/api/health',{headers});assert.equal((await r.json()).provider,'codex');
  const preflight=await fetch(url+'/api/health',{method:'OPTIONS',headers:{Origin:'null','Access-Control-Request-Headers':'authorization'}});assert.equal(preflight.status,204);assert.equal(preflight.headers.get('Access-Control-Allow-Origin'),'null');
  r=await fetch(url+'/api/health',{headers:{...headers,Origin:'null'}});assert.equal(r.status,200);assert.equal(r.headers.get('Access-Control-Allow-Origin'),'null');
- const workspace={schemaVersion:2,active:'fake-chat',chats:[{id:'fake-chat',title:'测试',name:'对方',note:'虚构测试',style:'不叫宝贝，句子短一点',preferredTone:'brief',messages:[{role:'partner',text:'你好'}]}],favorites:[]};
+ const workspace={schemaVersion:3,active:'fake-chat',chats:[{id:'fake-chat',title:'测试',name:'对方',note:'虚构测试',style:'不叫宝贝，句子短一点',preferredTone:'brief',messages:[{role:'partner',text:'你好'}]}],favorites:[]};
  r=await fetch(url+'/api/workspace',{method:'POST',headers,body:JSON.stringify({...workspace,baseRevision:0})});assert.equal(r.status,200);
  r=await fetch(url+'/api/workspace',{headers});const restored=(await r.json()).workspace;assert.deepEqual(restored.chats[0].messages.map(({role,text})=>({role,text})),workspace.chats[0].messages);assert.equal(restored.active,'fake-chat');assert.equal(restored.chats[0].style,workspace.chats[0].style);assert.equal(restored.chats[0].preferredTone,'brief');
  assert.equal((await stat(path.join(folder,'workspace.json'))).mode&0o777,0o600);
  assert.ok(!(await readFile(path.join(folder,'workspace.json'),'utf8')).includes(token));
- const large={schemaVersion:2,active:'bulk-0',chats:Array.from({length:15},(_,i)=>({id:'bulk-'+i,title:'虚构容量测试',name:'对方',messages:Array.from({length:40},()=>({role:'partner',text:'测'.repeat(2000)}))})),favorites:[],baseRevision:1};
+ const large={schemaVersion:3,active:'bulk-0',chats:Array.from({length:15},(_,i)=>({id:'bulk-'+i,title:'虚构容量测试',name:'对方',messages:Array.from({length:40},()=>({role:'partner',text:'测'.repeat(2000)}))})),favorites:[],baseRevision:1};
  const largeBody=JSON.stringify(large);assert.ok(Buffer.byteLength(largeBody)>3000000);
  r=await fetch(url+'/api/workspace',{method:'POST',headers,body:largeBody});assert.equal(r.status,200,'a valid full workspace must fit the HTTP backup limit');
  r=await fetch(url+'/api/workspace',{method:'DELETE',headers,body:JSON.stringify({baseRevision:2})});assert.equal(r.status,200);

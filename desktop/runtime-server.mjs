@@ -36,7 +36,7 @@ const server=http.createServer(async(req,res)=>{
   if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.4.0',workspaceSchema:2,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.4.1',workspaceSchema:3,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
     if(req.method==='DELETE'){const input=await body(req);const value=await workspaceStore.clear(input?.baseRevision);send(res,200,{deleted:true,revision:value.revision});return;}

@@ -3,6 +3,11 @@ export function parseTranscript(raw) {
  const text = raw.trim();
  if (!text) throw new Error('先粘贴一段聊天，再开始整理。');
  if (text.length > LIMITS.total) throw new Error('这段聊天超过 80,000 字，请分段导入。');
+ if (text.startsWith('{')) {
+  let value;try{value=JSON.parse(text);}catch{}
+  if(value&&['xianwai-library','xianwai-contact'].includes(value.format))throw new Error('这是联系人资料库导出文件，包含历史分析，不能作为聊天文本导入。请保留完整原文件；普通聊天 JSON 应使用消息数组。');
+  if(value&&Array.isArray(value.messages))return validateMessages(value.messages);
+ }
  if (text.startsWith('[')) {
   let rows;
   try { rows = JSON.parse(text); } catch { throw new Error('JSON 格式不正确，请检查括号和引号。'); }
