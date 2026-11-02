@@ -6,6 +6,15 @@
 
 Xianwai is a Chinese-language communication assistant for iPhone, powered by a paired Mac. It provides screenshot OCR, context-grounded analysis, and editable reply suggestions. Interpretations are hypotheses, not claims about another person's mind.
 
+## 0.3.2：扫码连接与恢复
+
+- Mac 先等待新域名的 DNS 记录发布，再请求手机公网地址的受鉴权健康接口，验证通过后才显示二维码；网络异常会显示具体诊断并重试。
+- 修复隧道日志分段、旧进程回调覆盖新连接、Codex 登录状态无法刷新和本机服务停止后无法重启。
+- 手机遇到短暂中转错误页会重试；配对失败后保留链接，刷新仍可重试；过期凭证明确提示重新扫码。
+- 后台恢复连接会等待编辑窗口关闭，避免丢失表单；切换页面保留未提交的消息输入。
+- 普通追加消息和语气偏好差异不会生成冲突副本；恢复时复用相同副本，并显示可重试的备份错误。
+- 修复原生 iOS 文件页面的配对跨域、相册取消后的回调错配、连续三次分析的取消竞态、异常分析结果及超时提示。
+
 ## 0.3.1：备份与取消任务修复
 
 - 备份带版本校验：多设备写入冲突会停止覆盖，重新配对会保留不同内容的本机副本，不再按数量静默截断。
@@ -47,7 +56,7 @@ Xianwai is a Chinese-language communication assistant for iPhone, powered by a p
 - `cloudflared`。
 - 已安装并登录的 ChatGPT 桌面应用，其中的 Codex CLI 能执行 `login status`。
 
-Mac 启动器目前使用 ChatGPT 应用内的 Codex 路径，以及 Homebrew 的 `/opt/homebrew/bin/node`、`/opt/homebrew/bin/cloudflared`。其他安装位置需调整 `desktop/XianwaiMac.swift`。
+Mac 启动器使用 ChatGPT 应用内的 Codex 路径；Node.js 与 cloudflared 会查找 `/opt/homebrew/bin` 和 `/usr/local/bin`。
 
 ```sh
 git clone https://github.com/Hanbin-Zhang-JPN/xianwai.git
@@ -57,11 +66,11 @@ zsh desktop/build-app.sh
 
 构建结果为 `output/弦外.app`，可双击运行或复制到自己的应用程序文件夹。
 
-1. 打开 Mac 上的「弦外」，保持窗口开启，等待手机二维码。
+1. 打开 Mac 上的「弦外」，等待“手机链接已验证”与二维码。验证期间可查看具体网络诊断。
 2. 用 iPhone 相机扫码，在 Safari 打开并确认连接 Mac。
 3. 点击“导入微信截图”，每次最多选择 12 张，核对识别结果后点击“保存并帮我回”。
 4. 回复草稿先出现，可编辑、即时切换语气并复制，再回微信粘贴发送；发送后可点“我已发出”补入前文。
-5. Safari 分享菜单 → 添加到主屏幕，下次像 App 一样打开。
+5. 本次 Mac 运行期间可从 Safari 添加到主屏幕；Mac 重启或更换隧道地址后，需要重新扫码，旧的主屏幕入口不会自动更新。
 
 Mac 窗口中的“打开 Mac 工作台”也能直接使用。应用在本机临时签名，尚未经过 Apple 公证；仓库不包含 IPA、TestFlight 或 App Store 安装包。
 
@@ -138,9 +147,9 @@ JSON 格式：
 npm test
 ```
 
-28 项自动检查覆盖导入格式、发送者不确定性、数据上限、前情与后续消息边界、本地语气、明确拒绝、安全信号、引用校验、API 错误、配对鉴权、偏好备份恢复、截图边界去重、快速粘贴与三种语气选择，以及备份版本冲突、删除竞态、损坏备份保护、撤销快照、取消前置任务、并发任务互斥、子进程退出和中文流解析。检查使用虚构数据与模拟模型响应，不需要真实模型密钥。
+40 项自动检查覆盖导入格式、发送者不确定性、数据上限、前情与后续消息边界、本地语气、明确拒绝、安全信号、引用校验、API 错误、配对鉴权、偏好备份恢复、截图边界去重、快速粘贴与三种语气选择，以及备份版本冲突、删除竞态、损坏备份保护、撤销快照、取消前置任务、并发任务互斥、子进程退出、中文流解析、扫码重试、过期链接、受限存储、三次连续取消、输入格式和恢复副本去重。检查使用虚构数据与模拟模型响应，不需要真实模型密钥。
 
-开发机上另已完成虚构截图的 HTTPS 上传、实际 Vision OCR、发送者核对、真实 Codex 分析和回复复制的端到端验证。手机尺寸使用浏览器验证，未进行 iPhone 真机测试。
+开发机上已完成虚构截图的 HTTPS 上传、实际 Vision OCR、发送者核对、真实 Codex 分析和回复复制验证。本次扫码修复已由用户在 iPhone Safari 确认连接成功；其余手机界面主要在浏览器手机尺寸回归，原生 iOS 工程仍未完整编译与真机验证。macOS 专用隧道检查在 Linux CI 中跳过。
 
 ## 项目结构
 

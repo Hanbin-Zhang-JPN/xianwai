@@ -57,3 +57,15 @@ test('request deadlines and caller cancellation work without AbortSignal.any',as
  await assert.rejects(withRequestTimeout(waitForAbort,undefined,5),{name:'AbortError'});
  const controller=new AbortController(),pending=withRequestTimeout(waitForAbort,controller.signal);controller.abort();await assert.rejects(pending,{name:'AbortError'});
 });
+
+test('ordinary appended messages and tone preferences do not create a conflict copy',()=>{
+ const local=workspace('第一句'),remote=structuredClone(local);remote.chats[0].messages.push({role:'me',text:'更新的消息'});local.chats[0].preferredTone='brief';
+ const merged=mergeWorkspaces(remote,local);assert.equal(merged.conflictCopies,0);assert.equal(merged.workspace.chats.length,1);assert.equal(merged.workspace.chats[0].messages.length,2);assert.equal(merged.workspace.chats[0].preferredTone,'brief');
+ assert.equal(mergeWorkspaces(local,remote).workspace.chats[0].messages.length,2);
+});
+test('re-pairing reuses an existing identical conflict copy instead of multiplying copies',()=>{
+ const remote=workspace('Mac 版'),local=workspace('本机不同版');
+ const first=mergeWorkspaces(remote,local,{newId:()=> 'copy'});
+ const second=mergeWorkspaces(first.workspace,local,{newId:()=>{throw new Error('unnecessary copy');}});
+ assert.equal(second.workspace.chats.length,2);assert.equal(second.workspace.active,'copy');assert.equal(second.conflictCopies,0);
+});

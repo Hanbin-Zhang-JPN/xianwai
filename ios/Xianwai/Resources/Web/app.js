@@ -163,7 +163,15 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
   const prior=chats.get(chat.id);
   if(!prior){chats.set(chat.id,chat);continue;}
   if(JSON.stringify(prior)===JSON.stringify(chat))continue;
-  const copy={...chat,id:newId(),title:chat.title.slice(0,24)+'（本机副本）'};chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
+  const sameProfile=['title','name','note','style','subtitle'].every(key=>prior[key]===chat[key]);
+  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text);
+  if(sameProfile&&(prefix(prior.messages,chat.messages)||prefix(chat.messages,prior.messages))){
+   chats.set(chat.id,{...(prior.messages.length>=chat.messages.length?prior:chat),preferredTone:chat.id===device.active?chat.preferredTone:prior.preferredTone});continue;
+  }
+  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&copy.title.replace(/（本机副本）$/,'')===chat.title.replace(/（本机副本）$/,'')&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages)===JSON.stringify(chat.messages));
+  if(priorCopy){if(active===chat.id)active=priorCopy.id;continue;}
+
+  const copy={...chat,id:newId(),title:chat.title.slice(0,24)+'（本机副本）'};if(chats.has(copy.id))throw new Error('生成对话编号失败，请重试。');chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
  }
  for(const item of device.favorites){
   const prior=favorites.get(item.id);
@@ -175,6 +183,15 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
 }
 
 const aborted=()=>new DOMException('已取消分析','AbortError');
+function validateClientAnalysis(value,input){
+ const context=contextFor(input.messages,input.targetIndex),count=context.length;
+ const validText=(text,max=2000)=>typeof text==='string'&&!!text.trim()&&text.length<=max;
+ const validEvidence=ids=>Array.isArray(ids)&&ids.length>0&&ids.length<=6&&ids.every(id=>Number.isInteger(id)&&id>=1&&id<=count);
+ if(!value||value.mode!=='ai'||value.contextCount!==count||!['title','feeling','need','question','avoid'].every(key=>validText(value[key]))||!Array.isArray(value.replies)||value.replies.length!==3||!Array.isArray(value.facts)||!value.facts.length||!Array.isArray(value.hypotheses)||value.hypotheses.length<2||value.hypotheses.length>3)throw new Error('分析结果格式不正确，请重试。');
+ if(value.replies.some((reply,index)=>!reply||reply.tone!==['warm','honest','brief'][index]||!['text','label','reason'].every(key=>validText(reply[key])))||[...value.facts,...value.hypotheses].some(item=>!item||!validText(item.text,2400)||!validEvidence(item.evidence)))throw new Error('分析结果中的回复或原话引用不正确，请重试。');
+ return value;
+}
+
 function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=700,timeout=170000}={}){
  let active=null,cancellation=Promise.resolve();
  const cache=new Map();
@@ -201,10 +218,11 @@ function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=70
   const old=active;
   const current={id:crypto.randomUUID(),controller:new AbortController(),base:endpoint.replace(/\/$/,''),token,submitted:false};
   active=current;
-  let complete=false;
-  const deadline=setTimeout(()=>current.controller.abort(),timeout);
+  let complete=false,timedOut=false;
+  const deadline=setTimeout(()=>{timedOut=true;current.controller.abort();},timeout);
   try{
-   await Promise.all([cancellation,stop(old)]);
+   cancellation=Promise.all([cancellation,stop(old)]).then(()=>{});
+   await cancellation;
    if(current.controller.signal.aborted||active!==current)throw aborted();
    const key=JSON.stringify({base:current.base,token,input});
    if(cache.has(key)){complete=true;return cache.get(key);}
@@ -223,11 +241,12 @@ function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=70
      if(result?.status==='failed')throw new Error(result.error||'AI 分析失败，请重试。');
     }
    }
-   if(!result||result.mode!=='ai'||!Array.isArray(result.replies)||result.replies.length!==3||!Array.isArray(result.facts)||!Array.isArray(result.hypotheses))throw new Error('分析结果格式不正确，请重试。');
+   validateClientAnalysis(result,input);
    if(current.controller.signal.aborted||active!==current)throw aborted();
    complete=true;cache.set(key,result);if(cache.size>30)cache.delete(cache.keys().next().value);
    return result;
   }catch(error){
+   if(timedOut)throw new DOMException('分析超时，请检查 Mac 连接后重试。','TimeoutError');
    if(current.controller.signal.aborted)throw aborted();
    throw error;
   }finally{
@@ -267,7 +286,7 @@ function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onErro
   const payload=scope.pending;scope.pending=null;if(!payload)return scope.running;
   scope.running=scope.running.then(async()=>{
    if(session!==scope||scope.blocked||scope.clearing)return;
-   try{const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
+   try{const serialized=JSON.stringify({...payload,baseRevision:scope.revision});const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:serialized,keepalive:new TextEncoder().encode(serialized).length<60000,signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
    catch(error){if(session!==scope||scope.controller.signal.aborted)return;scope.blocked=true;scope.pending=null;onError(error);}
   });
   return scope.running;
@@ -291,67 +310,117 @@ function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onErro
 }
 
 
-const requestAnalysis=options=>analysisClient.request(options);
+const safeStorage={
+ read(kind,key){try{return globalThis[kind]?.getItem(key)||null;}catch{return null;}},
+ write(kind,key,value){try{globalThis[kind].setItem(key,value);return true;}catch{return false;}},
+ remove(kind,key){try{globalThis[kind]?.removeItem(key);return true;}catch{return false;}}
+};
+function parsePairLink(value){
+ try{
+  const url=new URL(value),hash=new URLSearchParams(url.hash.slice(1)),base=new URL(hash.get('bridge')||url.origin),token=hash.get('key');
+  if(!/^[a-f0-9]{64}$/.test(token||'')||base.username||base.password||base.pathname!=='/'||base.search||base.hash||!(base.protocol==='https:'||(base.protocol==='http:'&&['127.0.0.1','localhost'].includes(base.hostname))))throw new Error();
+  return {endpoint:base.origin,token};
+ }catch{throw new Error('配对链接不完整，请复制 Mac 上的完整手机链接，或重新扫码。');}
+}
+function connectionError(error){
+ if(error?.status===401)return '二维码或配对链接已过期。请在 Mac 点击“重新连接”，再用 iPhone 相机重新扫码。';
+ if(error?.name==='AbortError'||error?.name==='TimeoutError')return '连接超时。请确认 Mac 开机联网，用 Safari 重新打开；仍失败时在 Mac 重新连接后扫码。';
+ return error?.message||'暂时连不上 Mac，请稍后重试。';
+}
+function pausePairing(milliseconds,signal){return new Promise((resolve,reject)=>{
+ if(signal?.aborted){reject(new DOMException('已取消连接','AbortError'));return;}
+ const abort=()=>{clearTimeout(timer);reject(new DOMException('已取消连接','AbortError'));};
+ const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},milliseconds);signal?.addEventListener('abort',abort,{once:true});
+});}
+async function probeConnection(pair,{fetcher=(...args)=>fetch(...args),signal,onAttempt=()=>{},attempts=3,delay=700,timeout=6000}={}){
+ let last;
+ for(let attempt=0;attempt<attempts;attempt++){
+  if(signal?.aborted)throw new DOMException('已取消连接','AbortError');onAttempt(attempt+1,attempts);
+  try{return await withRequestTimeout(async activeSignal=>{
+   let response;try{response=await fetcher(pair.endpoint+'/api/health',{headers:{Authorization:'Bearer '+pair.token},signal:activeSignal,cache:'no-store'});}catch(error){if(signal?.aborted)throw error;throw Object.assign(new Error('暂时无法访问手机链接，正在重试。可尝试切换 Wi-Fi / 蜂窝网络，并确认 Mac 仍联网。'),{status:502});}
+   if(!response.ok)throw Object.assign(new Error(response.status===401?'配对链接已过期。':'Mac 手机连接暂未就绪，请重试。'),{status:response.status});
+   let value;try{value=await response.json();}catch{throw Object.assign(new Error('手机链接返回了中转服务页面，尚未连到 Mac。请稍后重试。'),{status:502});}
+   if(value?.provider!=='codex'||typeof value.ready!=='boolean')throw Object.assign(new Error('这不是有效的弦外 Mac 连接，请重新扫码。'),{status:400});
+   return value;
+  },signal,timeout);}catch(error){last=error;if(signal?.aborted||error.status===401||(error.status>=400&&error.status<500)||attempt===attempts-1)throw error;await pausePairing(delay*(attempt+1),signal);}
+ }
+ throw last;
+}
+
+
+const requestAnalysis=async options=>{try{return await analysisClient.request(options);}catch(error){if(error.status===401)error.message=connectionError(error);if(error.status===401||error instanceof TypeError||error.name==='TimeoutError')document.dispatchEvent(new CustomEvent('xianwai-connection-error',{detail:connectionError(error)}));throw error;}};
 const cancelAnalysis=()=>analysisClient.cancel();
 
 function startCompanion(api){
  const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
- let connected=false,ocrAvailable=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null;
- const sync=createWorkspaceSync({onError:error=>toast(error.message+' 当前设备的记录仍保留。')});
+ let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='',heartbeat=null;
+ let contextVersion=0;
+ const sync=createWorkspaceSync({onError:error=>{syncError=error.message;draw();toast(error.message+' 当前设备的记录仍保留。');}});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
  const localWorkspace=()=>{const s=getState();return {active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
- const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw new Error(result?.error||'请求失败。');return result;};
+ const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
  const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
- const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}};
- const forget=()=>{for(const storage of [localStorage,sessionStorage])try{storage.removeItem('xianwai-connection-v1');}catch{}};
- function rememberPair(pair,remember){forget();try{(remember?localStorage:sessionStorage).setItem('xianwai-connection-v1',JSON.stringify({...pair,live:getState().live}));}catch{toast('浏览器未允许记住连接，下次需重新扫码。');}}
- function cancelPair(){pairTask?.controller.abort();pairTask=null;}
- function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;nativeChat=null;}
- function disconnect(){cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;const s=getState();s.live=false;s.endpoint='';s.token='';}
+ const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){const priorActive=s.active;Object.assign(s,workspace);if(s.active!==priorActive&&s.composerDrafts[priorActive])s.composerDrafts[s.active]??={...s.composerDrafts[priorActive]};s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}};
+ const forget=()=>{for(const kind of ['localStorage','sessionStorage'])safeStorage.remove(kind,'xianwai-connection-v1');};
+ function rememberPair(pair,remember){forget();if(!safeStorage.write(remember?'localStorage':'sessionStorage','xianwai-connection-v1',JSON.stringify({...pair,live:getState().live})))toast('浏览器未允许记住连接，下次需重新扫码。');}
+ function waitForNoDialog(signal){return new Promise((resolve,reject)=>{
+  const root=document.querySelector('#modal-root');
+  const done=()=>{observer.disconnect();signal.removeEventListener('abort',abort);resolve();};
+  const check=()=>{if(!root.querySelector('.modal'))done();};
+  const abort=()=>{observer.disconnect();reject(new DOMException('已取消连接','AbortError'));};
+  const observer=new MutationObserver(check);if(signal.aborted){abort();return;}signal.addEventListener('abort',abort,{once:true});observer.observe(root,{childList:true,subtree:true});check();
+ });}
+ function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){phase='disconnected';draw();}}
+ function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;}
+ function disconnect(){cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
  function draw(){
   const s=getState(),bench=document.querySelector('.workbench');
   if(bench&&!document.querySelector('.quick-actions')){
    const bar=document.createElement('div');bar.className='quick-actions';
    bar.innerHTML=`<button class="primary-btn" data-companion="screenshots">导入微信截图</button><button class="outline-btn" data-companion="paste">粘贴一句</button><button class="connection-state" data-companion="connection"><span class="dot"></span>${connected?(s.live?'Mac 已连接 · 真实 AI':'Mac 已连接 · 本地规则'):'连接 Mac，启用真实 AI'}</button>`;bench.before(bar);
   }
-  const badge=document.querySelector('.mode-pill');if(badge&&connected)badge.innerHTML='<span class="dot"></span>'+(s.live?'Codex AI 已连接':'本地规则 · Mac 已连接');
+  const status=phase==='connecting'?'正在验证 Mac 连接…':phase==='offline'?'Mac 连接中断 · 点此重试':connected?(aiReady?(s.live?'Mac 已连接 · 真实 AI':'Mac 已连接 · 本地规则'):'Mac 已连接 · Codex 待登录'):'连接 Mac，启用真实 AI';
+  const connectionButton=document.querySelector('[data-companion="connection"]');if(connectionButton)connectionButton.innerHTML='<span class="dot"></span>'+status;
+  const badge=document.querySelector('.mode-pill');if(badge)badge.innerHTML='<span class="dot"></span>'+(phase==='offline'?'Mac 连接中断':connected?(aiReady?(s.live?'Codex AI 已连接':'本地规则 · Mac 已连接'):'Codex 待登录'):phase==='connecting'?'正在连接 Mac':phase==='offline'?'Mac 连接中断':s.live?'在线服务已选择':'本地规则试用');
+  let backup=document.querySelector('.backup-status');if(!backup&&document.querySelector('.quick-actions')){backup=document.createElement('button');backup.className='backup-status';backup.dataset.companion='retry-backup';document.querySelector('.quick-actions').append(backup);}if(backup){backup.hidden=!syncError;backup.textContent=syncError?'Mac 备份未同步 · 点此恢复':'';backup.title=syncError;}
+
   const spinner=document.querySelector('.analysis-empty .spinner');if(spinner&&!document.querySelector('[data-companion="cancel"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='cancel';b.textContent='取消分析';b.style.marginTop='18px';spinner.parentElement.append(b);}
  }
- window.xianwaiCompanionRendered=draw;window.xianwaiIsConnected=()=>connected;
+ window.xianwaiCompanionRendered=draw;window.xianwaiIsConnected=()=>connected&&phase==='connected';
  window.xianwaiImportScreenshots=()=>chooseImages();
- function connectionHelp(){modal('连接你的 Mac','打开 Mac 上的「弦外」应用，扫描窗口里的二维码，或粘贴配对链接。',`<label for="pair-link">Mac 应用显示的配对链接</label><textarea id="pair-link" placeholder="https://…/#key=…" style="min-height:100px"></textarea><div class="notice">Mac 需要保持联网与开机。手机用 Safari 打开，再通过“分享 → 添加到主屏幕”进入。</div>`,`<button class="outline-btn" data-action="close-modal">稍后</button><button class="primary-btn" data-companion="parse-pair">连接 Mac</button>`);}
- function parsePair(value){const url=new URL(value),hash=new URLSearchParams(url.hash.slice(1));const base=hash.get('bridge')||url.origin,key=hash.get('key');const u=new URL(base);if(!key||!/^[a-f0-9]{64}$/.test(key)||u.username||u.password||u.pathname!=='/'||u.search||u.hash||!(u.protocol==='https:'||(u.protocol==='http:'&&u.hostname==='127.0.0.1')))throw new Error('配对链接不完整，请重新复制 Mac 窗口里的链接。');return{endpoint:base.replace(/\/$/,''),token:key};}
- function pairingModal(pair){pendingPair=pair;const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" checked>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
+ function connectionHelp(edit=false){if(pendingPair&&!edit){pairingModal(pendingPair);return;}modal('连接你的 Mac','打开 Mac 上的「弦外」应用，扫描窗口里的二维码，或粘贴配对链接。',`<label for="pair-link">Mac 应用显示的配对链接</label><textarea id="pair-link" placeholder="https://…/#key=…" style="min-height:100px"></textarea><div class="notice">Mac 需要保持联网与开机。手机用 Safari 打开，再通过“分享 → 添加到主屏幕”进入。</div>`,`<button class="outline-btn" data-action="close-modal">稍后</button><button class="primary-btn" data-companion="parse-pair">连接 Mac</button>`);}
+ const parsePair=parsePairLink;
+ function pairingModal(pair){pendingPair=pair;const hash=new URLSearchParams({key:pair.token});if(pair.endpoint!==location.origin)hash.set('bridge',pair.endpoint);history.replaceState(null,'',location.pathname+location.search+'#'+hash.toString());const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" checked>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-companion="edit-pair">更换配对链接</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
  async function connect(pair,options={}){
-  cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;stopAnalysis();
+  cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();
   const task={controller:new AbortController(),owner:options.owner};pairTask=task;
   const valid=()=>pairTask===task&&!task.controller.signal.aborted&&(!task.owner||task.owner.isConnected);
-  const timeout=setTimeout(()=>task.controller.abort(),15000);
+  const timeout=setTimeout(()=>task.controller.abort(),30000);
   try{
-   const status=await query(pair,'/api/health',task.controller.signal);
-   if(status.provider!=='codex'||!status.ready)throw new Error('Mac 上的 Codex 尚未登录，请先在 ChatGPT 应用登录。');
+   const status=await probeConnection(pair,{signal:task.controller.signal,onAttempt:(attempt,total)=>{const button=task.owner?.querySelector('[data-companion="connect"]');if(button)button.textContent=`正在验证 Mac（${attempt}/${total}）…`;}});
+   if(!task.owner){clearTimeout(timeout);await waitForNoDialog(task.controller.signal);}
    let restored=null,revision=0;
-   if(options.save){const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
+   if(options.save){const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
    const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
    if(restored)applyWorkspace(restored.workspace);
-   connected=true;ocrAvailable=!!status.ocr;
+   connected=true;ocrAvailable=!!status.ocr;aiReady=status.ready;phase='connected';syncError='';
    if(options.save)sync.connect({...pair,revision});
    rememberPair(pair,options.remember);api.persist();
-   pairTask=null;closeModal();render();toast(restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
+   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
   }catch(error){
    if(pairTask!==task||(task.owner&&!task.owner.isConnected))return;
-   getState().live=false;
-   const node=task.owner?.querySelector('#modal-error');const message=task.controller.signal.aborted?'连接超时，请检查 Mac 并重试。':error.message;if(node)node.textContent=message;else toast(message);
+   phase='offline';draw();
+   const node=task.owner?.querySelector('#modal-error');const message=connectionError(error);if(node)node.textContent=message;else toast(message);
    const button=task.owner?.querySelector('[data-companion="connect"]');if(button){button.disabled=false;button.textContent='重试连接';}
   }finally{clearTimeout(timeout);if(pairTask===task)pairTask=null;}
  }
  function chooseImages(){
-  if(window.webkit?.messageHandlers?.xianwai){nativeChat=getState().active;window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});return;}
+  if(window.webkit?.messageHandlers?.xianwai){if(nativeChat){toast('相册或截图识别仍在进行，请稍候。');return;}nativeChat={chatId:getState().active,id:crypto.randomUUID(),version:contextVersion};window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot',requestId:nativeChat.id});return;}
   if(!connected||!ocrAvailable){connectionHelp();return;}
-  const chatId=getState().active,input=document.createElement('input');input.type='file';input.accept='image/*';input.multiple=true;input.style.display='none';document.body.append(input);
-  input.onchange=()=>{const files=[...input.files];input.remove();if(getState().active===chatId)void importImages(files,chatId);};input.addEventListener('cancel',()=>input.remove(),{once:true});input.click();
+  const chatId=getState().active,version=contextVersion,owner=document.querySelector('#modal-root .modal'),input=document.createElement('input');input.type='file';input.accept='image/*';input.multiple=true;input.style.display='none';document.body.append(input);
+  input.onchange=()=>{const files=[...input.files];input.remove();if(getState().active===chatId&&contextVersion===version&&document.querySelector('#modal-root .modal')===owner)void importImages(files,chatId);};input.addEventListener('cancel',()=>input.remove(),{once:true});input.click();
  }
  async function resize(file){if(file.size>30000000)throw new Error('单张图片不能超过 30 MB。');const url=URL.createObjectURL(file);try{const image=new Image();image.src=url;await image.decode();const ratio=Math.min(1,2400/Math.max(image.naturalWidth,image.naturalHeight));const canvas=document.createElement('canvas');canvas.width=Math.round(image.naturalWidth*ratio);canvas.height=Math.round(image.naturalHeight*ratio);canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);return canvas.toDataURL('image/jpeg',0.88);}finally{URL.revokeObjectURL(url);}}
  async function importImages(files,chatId){
@@ -369,19 +438,23 @@ function startCompanion(api){
     if(!valid())return;if(!Array.isArray(result.rows))throw new Error('截图识别返回格式异常，请重试。');
     rows.push(...result.rows.map(row=>({...row,batch:i})));previews.push(dataUrl);if(rows.length>300)throw new Error('识别超过 300 条，请减少本次截图数量。');
    }
-   if(!valid())return;ocrTask=null;setReviewRows(rows.map(r=>({...r,uncertain:true})));showReview();
+   if(!valid())return;validateMessages(rows);ocrTask=null;setReviewRows(rows.map(r=>({...r,uncertain:true})));showReview();
    const preview=document.createElement('details');preview.className='screenshot-preview';preview.innerHTML='<summary>对照原截图 · '+previews.length+' 张</summary>'+previews.map(src=>`<img alt="本次选择的聊天截图" src="${src}">`).join('');document.querySelector('#review-rows')?.before(preview);toast('识别完成，核对后可保存并起草回复。');
   }catch(error){if(ocrTask!==task||!task.owner.isConnected)return;task.owner.querySelector('.ocr-progress')?.remove();task.owner.querySelector('#modal-error').textContent=task.controller.signal.aborted?'截图识别已停止或超时，请重新选择截图。':error.message;}finally{if(ocrTask===task)ocrTask=null;}
  }
  const nativeReceive=window.xianwaiReceiveOCR;
- window.xianwaiReceiveOCR=rows=>{const chatId=nativeChat;nativeChat=null;if(chatId&&getState().active===chatId)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
+ window.xianwaiReceiveOCR=(rows,id)=>{const task=nativeChat;if(!task||id!==task.id)return;nativeChat=null;if(getState().active===task.chatId&&contextVersion===task.version)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
+ window.xianwaiOCRCancelled=id=>{if(nativeChat?.id===id)nativeChat=null;};
  async function paste(){try{const text=await navigator.clipboard.readText();if(text.length>2000||(/^(我|对方|她|他|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);}catch{api.quickPaste('');toast('在下方输入框长按粘贴，再点帮我回。');}}
- document.addEventListener('xianwai-modal-closing',()=>{cancelPair();cancelOCR();});
- document.addEventListener('xianwai-context-changing',()=>cancelOCR());
+ document.addEventListener('xianwai-modal-closing',()=>{if(pairTask?.owner)cancelPair();if(ocrTask)cancelOCR();});
+ document.addEventListener('xianwai-context-changing',()=>{contextVersion++;cancelOCR();});
+ document.addEventListener('xianwai-connection-error',event=>{phase='offline';draw();toast(event.detail);});
  document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-companion]');if(!target)return;
   try{switch(target.dataset.companion){
    case'screenshots':chooseImages();break;case'paste':await paste();break;case'connection':connectionHelp();break;
+   case'edit-pair':connectionHelp(true);break;
+   case'retry-backup':if(getState().token)await connect({endpoint:endpoint()||location.origin,token:getState().token},{save:getState().persist,remember:!!safeStorage.read('localStorage','xianwai-connection-v1'),live:getState().live});break;
    case'parse-pair':pairingModal(parsePair(document.querySelector('#pair-link').value.trim()));break;
    case'connect':{const owner=target.closest('.modal'),options={owner,remember:owner.querySelector('#remember-pair').checked,save:owner.querySelector('#remember-chats').checked};target.disabled=true;target.textContent='正在连接 Mac…';await connect({...pendingPair},options);break;}
    case'cancel':stopAnalysis();await cancelAnalysis();toast('已取消分析。');break;
@@ -389,8 +462,8 @@ function startCompanion(api){
   }}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}
  });
  window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
- window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;try{remembered=!!(localStorage.getItem('xianwai-connection-v1')||sessionStorage.getItem('xianwai-connection-v1'));}catch{}if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
- window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;try{permanent=!!localStorage.getItem('xianwai-connection-v1');}catch{}rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
+ window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;remembered=!!(safeStorage.read('localStorage','xianwai-connection-v1')||safeStorage.read('sessionStorage','xianwai-connection-v1'));if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
+ window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;permanent=!!safeStorage.read('localStorage','xianwai-connection-v1');rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
  window.xianwaiBeforeSettings=async(candidate,signal)=>{
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
@@ -399,10 +472,23 @@ function startCompanion(api){
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));
- if(hash.has('key')){try{const pair=parsePair(location.href);history.replaceState(null,'',location.pathname+location.search);pairingModal(pair);}catch(error){toast(error.message);}}
- else{let saved,remember=true,savedLive=true;try{const local=localStorage.getItem('xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||sessionStorage.getItem('xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
+ if(hash.has('key')){try{const pair=parsePair(location.href);pairingModal(pair);}catch(error){toast(error.message);}}
+ else{let saved,remember=true,savedLive=true;try{const local=safeStorage.read('localStorage','xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||safeStorage.read('sessionStorage','xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
+ async function checkConnection(){
+  const s=getState();if(document.hidden||pairTask||heartbeat||!s.token)return;
+  const pair={endpoint:endpoint()||location.origin,token:s.token};
+  heartbeat=probeConnection(pair,{attempts:1});
+  try{const status=await heartbeat;if(s!==getState()||pair.token!==getState().token||pair.endpoint!==(endpoint()||location.origin))return;connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();}
+  catch{if(pair.token===getState().token){phase='offline';draw();}}
+  finally{heartbeat=null;}
+ }
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkConnection();else void sync.flush();});
+ window.addEventListener('online',()=>void checkConnection());
+ window.addEventListener('pagehide',()=>void sync.flush());
+ setInterval(()=>void checkConnection(),20000);
  draw();
 }
+
 
 const paths={chat:'M4 4h16v12H9l-5 5V4z',plus:'M12 5v14M5 12h14',book:'M4 4h6c1 0 2 1 2 2v15c0-2-2-3-4-3H4V4zm16 0h-6c-1 0-2 1-2 2v15c0-2 2-3 4-3h4V4z',heart:'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8z',shield:'M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3zM9 12l2 2 4-4',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2',upload:'M12 16V3m-4 4 4-4 4 4M4 16v5h16v-5',spark:'m12 3 2.8 6.2L21 12l-6.2 2.8L12 21l-2.8-6.2L3 12l6.2-2.8L12 3z',arrow:'M5 12h14m-6-6 6 6-6 6',send:'m3 3 19 9-19 9 4-9-4-9zm4 9h15',copy:'M9 9h12v12H9zM15 5V3H3v12h2',check:'m5 12 4 4L19 6',close:'m6 6 12 12M6 18 18 6',menu:'M4 6h16M4 12h16M4 18h16',down:'m6 9 6 6 6-6',more:'M5 12h.01M12 12h.01M19 12h.01',warn:'m12 3 10 18H2L12 3zm0 6v5m0 3h.01',link:'M10 13a5 5 0 0 0 7 0l4-4a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-4 4a5 5 0 0 0 7 7l2-2',edit:'m16 3 5 5-13 13H3v-5L16 3z',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',photo:'M3 4h18v16H3zm0 12 5-5 5 5 4-4 4 4M15 8h.01',lock:'M6 11h12v10H6zm2 0V7a4 4 0 1 1 8 0v4',download:'M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4'};
 const icon=(name)=>`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]||paths.chat}"/></svg>`;
@@ -416,9 +502,9 @@ const samples=[sample('late','晚归的约定','小满','关于陪伴与期待',
  ['partner','周六我们去看那个展吧？'],['me','好，等我忙完订票。'],['partner','你上次也这么说，后来就忘了。']
 ])];
 const freshChat={id:crypto.randomUUID(),title:'我的聊天',name:'对方',subtitle:'常用对话',note:'',style:'',preferredTone:'warm',messages:[]};
-let state={chats:[freshChat,...structuredClone(samples)],active:freshChat.id,page:'chat',selected:null,tone:'warm',replyDrafts:{},analysis:null,favorites:[],persist:false,live:false,endpoint:'',token:'',loading:false,mobileSheet:false};
+let state={chats:[freshChat,...structuredClone(samples)],active:freshChat.id,page:'chat',selected:null,tone:'warm',replyDrafts:{},analysis:null,favorites:[],persist:false,live:false,endpoint:'',token:'',loading:false,mobileSheet:false,composerDrafts:{}};
 let localRecovery=null;
-try{const raw=localStorage.getItem('xianwai-v1');if(raw){try{const saved=JSON.parse(raw);if(saved?.persist){const workspace=normalizeWorkspace(saved);if(!workspace.chats.length)throw new Error();state={...state,...workspace,persist:true};}}catch{localRecovery=raw;}}}catch{}
+try{const raw=safeStorage.read('localStorage','xianwai-v1');if(raw){try{const saved=JSON.parse(raw);if(saved?.persist){const workspace=normalizeWorkspace(saved);if(!workspace.chats.length)throw new Error();state={...state,...workspace,persist:true};}}catch{localRecovery=raw;}}}catch{}
 const $=(s,root=document)=>root.querySelector(s);const current=()=>state.chats.find(c=>c.id===state.active)||state.chats[0];let generation=0,toastTimer,reviewRows=[],clearing=false;
 state.tone=current().preferredTone||'warm';
 function adoptCurrent(){const c=current();if(samples.some(sample=>sample.id===c.id)){c.id=crypto.randomUUID();state.active=c.id;c.title='我的聊天';c.name='对方';c.subtitle='已导入的聊天';}return c;}
@@ -440,7 +526,7 @@ function renderChat(){
    ${c.messages.length?c.messages.map((m,i)=>`<div class="msg ${m.role==='me'?'me':''} ${i===state.selected?'selected':''}" id="msg-${i}"><span class="avatar ${m.role==='partner'?'peach':''}">${m.role==='me'?'我':esc(c.name.slice(0,1))}</span><div class="msg-body"><div class="msg-name">${m.role==='me'?'我':esc(c.name)} <span style="opacity:.55">· ${i+1}</span></div><button class="bubble" data-message="${i}" aria-label="分析第 ${i+1} 条消息：${esc(m.text)}">${esc(m.text)}</button>${state.selected===i?`<div class="selected-hint">${icon('spark')}已选中这句话</div>`:''}</div></div>`).join(''):`<div class="empty-state"><h2>复制她刚发的那句话</h2><p>在下方粘贴，再点“帮我回”。<br>已有聊天可先导入截图，前情会一起参考。</p><button class="outline-btn" data-action="profile">${icon('edit')}设置称呼和说话习惯</button></div>`}
   </div>
   <div class="chat-tip">${icon('shield')}复制草稿不会自动记为已发送</div>
-  <form class="composer quick-composer" id="composer"><select name="role" aria-label="添加消息的发送者"><option value="partner">对方</option><option value="me">我</option></select><textarea name="message" aria-label="对方刚发的消息" placeholder="粘贴对方刚发的一句…" maxlength="2000" rows="2"></textarea><button type="submit" aria-label="帮我回这句话">帮我回 ${icon('arrow')}</button></form>
+  <form class="composer quick-composer" id="composer" data-chat-id="${esc(c.id)}"><select name="role" aria-label="添加消息的发送者"><option value="partner" ${state.composerDrafts[c.id]?.role!=='me'?'selected':''}>对方</option><option value="me" ${state.composerDrafts[c.id]?.role==='me'?'selected':''}>我</option></select><textarea name="message" aria-label="对方刚发的消息" placeholder="粘贴对方刚发的一句…" maxlength="2000" rows="2">${esc(state.composerDrafts[c.id]?.text||'')}</textarea><button type="submit" aria-label="帮我回这句话">${state.composerDrafts[c.id]?.role==='me'?'记录这句':'帮我回 '+icon('arrow')}</button></form>
   ${canUndoRecord(state.undoRecord,c)?'<button class="undo-record" data-action="undo-record">撤销刚才的“已发出”记录</button>':''}
  </section><div class="analysis-scrim ${state.mobileSheet?'open':''}" data-action="close-analysis"></div><section class="analysis-panel ${state.mobileSheet?'open':''}" aria-label="消息分析" id="analysis"></section></div>`;
 }
@@ -488,7 +574,7 @@ function showReview(){
  updateReviewSummary();
 }
 function reviewPlan(){return prepareImport(current().messages,collectRows(),{append:!!$('#append-import')?.checked,removeOverlap:$('#dedupe-import')?.checked!==false});}
-function updateReviewSummary(){const node=$('#import-summary');if(!node)return;try{const plan=reviewPlan();node.textContent=`保存后共 ${plan.messages.length} 条语境${plan.totalOverlap?' · 发现 '+plan.totalOverlap+' 条完全重叠，'+($('#dedupe-import').checked?'将合并':'保留全部'):''}。最后一句是${plan.messages.at(-1).role==='partner'?'对方的消息，可直接起草回复':'你发出的消息，会先保存前情'}。`;}catch(error){node.textContent=error.message;}}
+function updateReviewSummary(){const buttons=document.querySelectorAll('[data-action="confirm-import"],[data-action="import-and-reply"]');const node=$('#import-summary');if(!node)return;try{const plan=reviewPlan();buttons.forEach(button=>button.disabled=false);node.textContent=`保存后共 ${plan.messages.length} 条语境${plan.totalOverlap?' · 发现 '+plan.totalOverlap+' 条完全重叠，'+($('#dedupe-import').checked?'将合并':'保留全部'):''}。最后一句是${plan.messages.at(-1).role==='partner'?'对方的消息，可直接起草回复':'你发出的消息，会先保存前情'}。`;}catch(error){buttons.forEach(button=>button.disabled=true);node.textContent=error.message;}}
 async function confirmImport(reply=false){try{const plan=reviewPlan();invalidate();adoptCurrent().messages=plan.messages;state.selected=null;state.analysis=null;state.replyDrafts={};persist();closeModal();render();if(reply&&plan.messages.at(-1).role==='partner')await analyze(plan.messages.length-1);else toast(`已保存 ${plan.messages.length} 条${plan.removed||plan.screenshotOverlap?'，已合并完全重叠的前文':''}。`);}catch(error){modalError(error.message);}}
 
 function collectRows(){return [...document.querySelectorAll('.review-row')].map((r,i)=>({...reviewRows[i],role:$('select',r).value,text:$('textarea',r).value}));}
@@ -504,13 +590,13 @@ function editProfile(){
 }
 async function copyText(t){if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'copy',text:t});toast('已复制，回微信前再确认一下语气。');return;}try{await navigator.clipboard.writeText(t);toast('已复制，回微信前再确认一下语气。');}catch{modal('复制这句话','浏览器未允许自动复制，可选择下面的文字手动复制。',`<textarea id="manual-copy">${esc(t)}</textarea>`,`<button class="primary-btn" data-action="close-modal">完成</button>`);$('#manual-copy').select();}}
 document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-action]');if(!b)return;const action=b.dataset.action;if(b.dataset.page){state.page=b.dataset.page;state.mobileSheet=false;render();return;}if(b.dataset.chat){selectChat(b.dataset.chat);return;}if(b.dataset.message!==undefined){analyze(Number(b.dataset.message));return;}if(b.dataset.ref!==undefined){if(matchMedia('(max-width:950px)').matches){state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');}const msg=$('#msg-'+b.dataset.ref);msg?.scrollIntoView({behavior:'smooth',block:'center'});msg?.animate([{opacity:.4},{opacity:1}],{duration:600});return;}if(b.dataset.tone){state.tone=b.dataset.tone;current().preferredTone=state.tone;persist();renderAnalysis();return;}if(b.dataset.copy!==undefined){copyText(state.analysis.replies[Number(b.dataset.copy)].text);return;}if(b.dataset.edit!==undefined){const r=state.analysis.replies[Number(b.dataset.edit)];modal('改成你自己的话','先确认回复符合真实情况，再复制发送。',`<textarea id="edit-reply">${esc(r.text)}</textarea>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="copy-edited">${icon('copy')}复制编辑后的回复</button>`);return;}if(b.dataset.save!==undefined){const r=state.analysis.replies[Number(b.dataset.save)],existing=state.favorites.find(f=>f.text===r.text);if(!existing&&state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');return;}if(existing)state.favorites=state.favorites.filter(f=>f.id!==existing.id);else state.favorites.unshift({id:crypto.randomUUID(),text:r.text,label:r.label,name:current().name,source:current().title});persist();renderAnalysis();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast(existing?'已移除收藏':'已收藏这句话');return;}if(b.dataset.favCopy){copyText(state.favorites.find(f=>f.id===b.dataset.favCopy).text);return;}if(b.dataset.favRemove){state.favorites=state.favorites.filter(f=>f.id!==b.dataset.favRemove);persist();render();return;}if(b.dataset.moveRow!==undefined){reviewRows=collectRows();const from=Number(b.dataset.moveRow),to=from+Number(b.dataset.direction);if(to>=0&&to<reviewRows.length)[reviewRows[from],reviewRows[to]]=[reviewRows[to],reviewRows[from]];showReview();return;}if(b.dataset.removeRow!==undefined){reviewRows=collectRows();reviewRows.splice(Number(b.dataset.removeRow),1);showReview();return;}
-switch(action){case'menu':$('#sidebar').classList.toggle('open');break;case'import':openImport();break;case'close-modal':closeModal();break;case'settings':settings();break;case'profile':editProfile();break;case'close-analysis':state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');break;case'new':{if(state.chats.length>=15){toast('最多保留 15 段对话，请先导出并清理。');break;}const c={id:crypto.randomUUID(),title:'新的对话',name:'对方',subtitle:'给彼此多一点理解',note:'',messages:[]};state.chats.unshift(c);persist();selectChat(c.id);openImport();break;}case'choose-file':$('#file-input').click();break;case'parse':try{reviewRows=parseTranscript($('#transcript').value);showReview();}catch(err){modalError(err.message);}break;case'back-import':{reviewRows=collectRows();openImport(reviewRows.map(r=>(r.role==='me'?'我':'对方')+'：'+r.text).join('\n'));break;}case'confirm-import':await confirmImport(false);break;case'import-and-reply':await confirmImport(true);break;case'swap-review':reviewRows=collectRows().map(r=>({...r,role:r.role==='me'?'partner':'me'}));showReview();break;case'reply-latest':{const i=latestPartnerIndex(current().messages);if(i>=0)analyze(i);break;}case'copy-draft':await copyText($('#reply-draft').value);break;case'save-draft':{if(state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');break;}const text=$('#reply-draft').value.trim();if(text&&!state.favorites.some(f=>f.text===text)){state.favorites.unshift({id:crypto.randomUUID(),text,label:TONES.find(t=>t.id===state.tone)?.label||'草稿',name:current().name,source:current().title});persist();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast('已收藏你编辑后的草稿。');}break;}case'record-draft':{const c=adoptCurrent(),text=$('#reply-draft').value.trim();try{const result=addQuickMessage(c.messages,text,'me');c.messages=result.messages;state.undoRecord=result.reused?null:{chatId:c.id,snapshot:JSON.stringify(c.messages),analysis:state.analysis,selected:state.selected,tone:state.tone,drafts:{...state.replyDrafts}};state.selected=null;state.analysis=null;state.mobileSheet=false;persist();render();toast(result.reused?'这句已经在前文中。':'已记录为你发出的消息，下次会一起参考。');}catch(error){toast(error.message);}break;}case'undo-record':{const c=current();if(canUndoRecord(state.undoRecord,c)){c.messages.pop();const undo=state.undoRecord;state.undoRecord=null;state.analysis=undo.analysis;state.selected=undo.selected;state.tone=undo.tone;state.replyDrafts=undo.drafts;state.mobileSheet=true;persist();render();toast('已撤销记录，编辑过的草稿也已恢复。');}break;}case'screenshot':if(window.xianwaiImportScreenshots){window.xianwaiImportScreenshots();}else if(window.webkit?.messageHandlers?.xianwai){toast('正在打开相册，图片将在本机识别。');window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});}else{modal('在 iPhone 上识别截图','网页原型暂不识别图片。iPhone 源码版内置 Apple Vision 本机文字识别。',`<div class="notice">在 iPhone App 的“导入聊天 → 截图识别”中，从相册选择截图。识别后的文字先进入核对界面，不会自动上传。网页可以粘贴已有文字，或导入 TXT / JSON。</div>`,`<button class="primary-btn" data-action="import">返回文字导入</button>`);}break;case'save-settings':{const endpoint=$('#endpoint').value.trim().replace(/\/$/,'');if(endpoint){try{const u=new URL(endpoint);if(u.username||u.password||u.search||u.hash||u.pathname!=='/'||(u.protocol!=='https:'&&!(u.protocol==='http:'&&['127.0.0.1','localhost'].includes(u.hostname))))throw new Error();}catch{modalError('请输入不带路径和参数的 HTTPS 后端地址，本机可用 http://localhost:4388。');break;}}const owner=$('#modal-root .modal'),candidate={endpoint,token:$('#token').value.trim(),persist:$('#persist').checked,live:$('#live').checked};b.disabled=true;const settingsTask=new AbortController(),abortSettings=()=>settingsTask.abort();document.addEventListener('xianwai-modal-closing',abortSettings,{once:true});try{await window.xianwaiBeforeSettings?.(candidate,settingsTask.signal);if(!owner.isConnected)break;invalidate();Object.assign(state,candidate);window.xianwaiSettingsSaved?.();persist();}catch(error){if(owner.isConnected){modalError(error.message);b.disabled=false;}break;}finally{document.removeEventListener('xianwai-modal-closing',abortSettings);}closeModal();if(state.selected!==null)analyze(state.selected,false);else render();toast(state.live?'已开启在线 AI，聊天将发送至你配置的服务。':'已切换为本地规则试用');break;}case'save-profile':{invalidate();const c=adoptCurrent();c.title=$('#chat-title').value.trim()||'新的对话';c.name=$('#partner-name').value.trim()||'对方';c.note=$('#context-note').value.trim();c.style=$('#reply-style').value.trim();c.preferredTone=$('#preferred-tone').value;state.tone=c.preferredTone;persist();closeModal();state.analysis=null;state.selected=null;render();toast('已保存，下一次起草会参考你的习惯。');break;}case'copy-edited':copyText($('#edit-reply').value);break;case'retry':if(state.selected!==null)analyze(state.selected);break;case'export':{const c=current(),data=JSON.stringify(c.messages,null,2);if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'export',text:data});break;}const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='弦外-聊天.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('已导出聊天 JSON');break;}case'clear':modal('清除聊天与收藏','这会删除当前工作台的聊天和收藏、已连接 Mac 的备份，并关闭保存。请先导出需要保留的聊天。',`<div class="notice">无法撤销此操作。如已配对，Mac 备份删除成功后才会清除本机内容。</div>`,`<button class="outline-btn" data-action="settings">返回设置</button><button class="primary-btn" data-action="confirm-clear">确认清除</button>`);break;case'confirm-clear':{if(clearing)break;const owner=$('#modal-root .modal');clearing=true;owner.querySelectorAll('button').forEach(button=>button.disabled=true);invalidate();try{await window.xianwaiDeleteBackup?.();clearing=false;localRecovery=null;const chat={...freshChat,id:crypto.randomUUID(),messages:[]};state={...state,chats:[chat,...structuredClone(samples)],favorites:[],persist:false,active:chat.id,selected:null,analysis:null,loading:false,page:'chat',mobileSheet:false};persist();closeModal();render();toast('已清除聊天与收藏，并关闭保存。');}catch(error){clearing=false;modalError(error.message);owner.querySelectorAll('button').forEach(button=>button.disabled=false);}break;}case'download-recovery':{const url=URL.createObjectURL(new Blob([localRecovery||''],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='弦外-原始记录备份.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);break;}}});
+switch(action){case'menu':$('#sidebar').classList.toggle('open');break;case'import':openImport();break;case'close-modal':closeModal();break;case'settings':settings();break;case'profile':editProfile();break;case'close-analysis':state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');break;case'new':{if(state.chats.length>=15){toast('最多保留 15 段对话，请先导出并清理。');break;}const c={id:crypto.randomUUID(),title:'新的对话',name:'对方',subtitle:'给彼此多一点理解',note:'',messages:[]};state.chats.unshift(c);persist();selectChat(c.id);openImport();break;}case'choose-file':$('#file-input').click();break;case'parse':try{reviewRows=parseTranscript($('#transcript').value);showReview();}catch(err){modalError(err.message);}break;case'back-import':{reviewRows=collectRows();openImport(reviewRows.map(r=>(r.role==='me'?'我':'对方')+'：'+r.text).join('\n'));break;}case'confirm-import':await confirmImport(false);break;case'import-and-reply':await confirmImport(true);break;case'swap-review':reviewRows=collectRows().map(r=>({...r,role:r.role==='me'?'partner':'me'}));showReview();break;case'reply-latest':{const i=latestPartnerIndex(current().messages);if(i>=0)analyze(i);break;}case'copy-draft':await copyText($('#reply-draft').value);break;case'save-draft':{if(state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');break;}const text=$('#reply-draft').value.trim();if(text&&!state.favorites.some(f=>f.text===text)){state.favorites.unshift({id:crypto.randomUUID(),text,label:TONES.find(t=>t.id===state.tone)?.label||'草稿',name:current().name,source:current().title});persist();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast('已收藏你编辑后的草稿。');}break;}case'record-draft':{const original=current(),text=$('#reply-draft').value.trim();try{const result=addQuickMessage(original.messages,text,'me'),c=adoptCurrent();c.messages=result.messages;state.undoRecord=result.reused?null:{chatId:c.id,snapshot:JSON.stringify(c.messages),analysis:state.analysis,selected:state.selected,tone:state.tone,drafts:{...state.replyDrafts}};state.selected=null;state.analysis=null;state.mobileSheet=false;persist();render();toast(result.reused?'这句已经在前文中。':'已记录为你发出的消息，下次会一起参考。');}catch(error){toast(error.message);}break;}case'undo-record':{const c=current();if(canUndoRecord(state.undoRecord,c)){c.messages.pop();const undo=state.undoRecord;state.undoRecord=null;state.analysis=undo.analysis;state.selected=undo.selected;state.tone=undo.tone;state.replyDrafts=undo.drafts;state.mobileSheet=true;persist();render();toast('已撤销记录，编辑过的草稿也已恢复。');}break;}case'screenshot':if(window.xianwaiImportScreenshots){window.xianwaiImportScreenshots();}else if(window.webkit?.messageHandlers?.xianwai){toast('正在打开相册，图片将在本机识别。');window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});}else{modal('在 iPhone 上识别截图','网页原型暂不识别图片。iPhone 源码版内置 Apple Vision 本机文字识别。',`<div class="notice">在 iPhone App 的“导入聊天 → 截图识别”中，从相册选择截图。识别后的文字先进入核对界面，不会自动上传。网页可以粘贴已有文字，或导入 TXT / JSON。</div>`,`<button class="primary-btn" data-action="import">返回文字导入</button>`);}break;case'save-settings':{const endpoint=$('#endpoint').value.trim().replace(/\/$/,'');if(endpoint){try{const u=new URL(endpoint);if(u.username||u.password||u.search||u.hash||u.pathname!=='/'||(u.protocol!=='https:'&&!(u.protocol==='http:'&&['127.0.0.1','localhost'].includes(u.hostname))))throw new Error();}catch{modalError('请输入不带路径和参数的 HTTPS 后端地址，本机可用 http://localhost:4388。');break;}}const owner=$('#modal-root .modal'),candidate={endpoint,token:$('#token').value.trim(),persist:$('#persist').checked,live:$('#live').checked};b.disabled=true;const settingsTask=new AbortController(),abortSettings=()=>settingsTask.abort();document.addEventListener('xianwai-modal-closing',abortSettings,{once:true});try{await window.xianwaiBeforeSettings?.(candidate,settingsTask.signal);if(!owner.isConnected)break;invalidate();Object.assign(state,candidate);window.xianwaiSettingsSaved?.();persist();}catch(error){if(owner.isConnected){modalError(error.message);b.disabled=false;}break;}finally{document.removeEventListener('xianwai-modal-closing',abortSettings);}closeModal();if(state.selected!==null)analyze(state.selected,false);else render();toast(state.live?'已开启在线 AI，聊天将发送至你配置的服务。':'已切换为本地规则试用');break;}case'save-profile':{invalidate();const c=adoptCurrent();c.title=$('#chat-title').value.trim()||'新的对话';c.name=$('#partner-name').value.trim()||'对方';c.note=$('#context-note').value.trim();c.style=$('#reply-style').value.trim();c.preferredTone=$('#preferred-tone').value;state.tone=c.preferredTone;persist();closeModal();state.analysis=null;state.selected=null;render();toast('已保存，下一次起草会参考你的习惯。');break;}case'copy-edited':copyText($('#edit-reply').value);break;case'retry':if(state.selected!==null)analyze(state.selected);break;case'export':{const c=current(),data=JSON.stringify(c.messages,null,2);if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'export',text:data});break;}const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='弦外-聊天.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('已导出聊天 JSON');break;}case'clear':modal('清除聊天与收藏','这会删除当前工作台的聊天和收藏、已连接 Mac 的备份，并关闭保存。请先导出需要保留的聊天。',`<div class="notice">无法撤销此操作。如已配对，Mac 备份删除成功后才会清除本机内容。</div>`,`<button class="outline-btn" data-action="settings">返回设置</button><button class="primary-btn" data-action="confirm-clear">确认清除</button>`);break;case'confirm-clear':{if(clearing)break;const owner=$('#modal-root .modal');clearing=true;owner.querySelectorAll('button').forEach(button=>button.disabled=true);invalidate();try{await window.xianwaiDeleteBackup?.();clearing=false;localRecovery=null;const chat={...freshChat,id:crypto.randomUUID(),messages:[]};state={...state,chats:[chat,...structuredClone(samples)],favorites:[],persist:false,active:chat.id,selected:null,analysis:null,loading:false,page:'chat',mobileSheet:false,composerDrafts:{}};persist();closeModal();render();toast('已清除聊天与收藏，并关闭保存。');}catch(error){clearing=false;modalError(error.message);owner.querySelectorAll('button').forEach(button=>button.disabled=false);}break;}case'download-recovery':{const url=URL.createObjectURL(new Blob([localRecovery||''],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='弦外-原始记录备份.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);break;}}});
 document.addEventListener('submit',async e=>{
  if(e.target.id!=='composer')return;e.preventDefault();const f=e.target,text=f.elements.message.value.trim(),role=f.elements.role.value;if(!text){toast('先粘贴对方的一句话。');return;}
  if(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')){openImport(text);return;}
- try{const c=current(),result=addQuickMessage(samples.some(x=>x.id===c.id)?[]:c.messages,text,role);adoptCurrent();invalidate();c.messages=result.messages;state.analysis=null;state.selected=null;state.replyDrafts={};persist();if(role==='partner')await analyze(c.messages.length-1);else{render();toast(result.reused?'这句已经在前文中。':'已把你的回复加入前文。');}}catch(error){toast(error.message);}
+ try{const c=current(),result=addQuickMessage(samples.some(x=>x.id===c.id)?[]:c.messages,text,role);const priorId=c.id;adoptCurrent();delete state.composerDrafts[priorId];invalidate();c.messages=result.messages;state.analysis=null;state.selected=null;state.replyDrafts={};persist();if(role==='partner')await analyze(c.messages.length-1);else{render();toast(result.reused?'这句已经在前文中。':'已把你的回复加入前文。');}}catch(error){toast(error.message);}
 });
-document.addEventListener('change',async e=>{if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{const input=$('#transcript'),chatId=state.active,text=await f.text();if(!input?.isConnected||state.active!==chatId)return;input.value=text;toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
+document.addEventListener('change',async e=>{if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:e.target.value};$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{const input=$('#transcript'),chatId=state.active,text=await f.text();if(!input?.isConnected||state.active!==chatId)return;input.value=text;toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');$('#sidebar')?.classList.remove('open');}if(e.key==='Tab'&&$('#modal-root .modal')){const items=[...$('#modal-root').querySelectorAll('button,input,textarea,select')].filter(x=>!x.hidden&&!x.disabled);if(e.shiftKey&&document.activeElement===items[0]){e.preventDefault();items.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===items.at(-1)){e.preventDefault();items[0]?.focus();}}});
 function bindLongPress(){document.querySelectorAll('[data-message]').forEach(b=>{let timer,x,y,fired=false;b.addEventListener('pointerdown',e=>{if(e.button!==0)return;fired=false;x=e.clientX;y=e.clientY;timer=setTimeout(()=>{fired=true;navigator.vibrate?.(15);analyze(Number(b.dataset.message));},450);});b.addEventListener('pointermove',e=>{if(Math.abs(e.clientX-x)>8||Math.abs(e.clientY-y)>8)clearTimeout(timer);});for(const event of ['pointerup','pointercancel','pointerleave'])b.addEventListener(event,()=>clearTimeout(timer));b.addEventListener('click',e=>{if(fired){e.preventDefault();e.stopPropagation();} });b.addEventListener('contextmenu',e=>{e.preventDefault();clearTimeout(timer);analyze(Number(b.dataset.message));});});}
 window.xianwaiReceiveOCR=(rows)=>{try{reviewRows=validateMessages(rows).map(r=>({...r,uncertain:true}));showReview();toast('识别完成，请核对发送者、文字和顺序。');}catch(err){toast(err.message);}};
@@ -519,6 +605,6 @@ state.analysis=state.selected!==null?localAnalysis(current().messages,state.sele
 
 startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){input.value=text;input.focus();}else openImport(text);},stopAnalysis:()=>{invalidate();render();}});
 
-document.addEventListener('input',e=>{if(e.target.id==='reply-draft')state.replyDrafts[state.tone]=e.target.value;if(e.target.closest('.review-row'))updateReviewSummary();});
+document.addEventListener('input',e=>{if(e.target.closest('#composer'))state.composerDrafts[state.active]={text:$('#composer textarea').value,role:$('#composer select').value};if(e.target.id==='reply-draft')state.replyDrafts[state.tone]=e.target.value;if(e.target.closest('.review-row'))updateReviewSummary();});
 
 })();

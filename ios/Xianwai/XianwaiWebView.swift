@@ -14,6 +14,7 @@ struct XianwaiWebView: UIViewControllerRepresentable {
 final class XianwaiController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, PHPickerViewControllerDelegate {
     private var webView: WKWebView!
     private var readingImage = false
+    private var screenshotRequestId: String?
     private let fileRoot = Bundle.main.url(forResource: "Web", withExtension: nil)!
 
     override func loadView() {
@@ -30,7 +31,7 @@ final class XianwaiController: UIViewController, WKScriptMessageHandler, WKNavig
         webView.loadFileURL(fileRoot.appendingPathComponent("index.html"), allowingReadAccessTo: fileRoot)
     }
 
-    func tearDown() { webView?.configuration.userContentController.removeScriptMessageHandler(forName: "xianwai") }
+    func tearDown() { screenshotRequestId = nil; webView?.configuration.userContentController.removeScriptMessageHandler(forName: "xianwai") }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame,
@@ -39,7 +40,8 @@ final class XianwaiController: UIViewController, WKScriptMessageHandler, WKNavig
               let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
         case "pickScreenshot":
-            guard !readingImage, presentedViewController == nil else { return }
+            guard let requestId = body["requestId"] as? String, !readingImage, presentedViewController == nil else { return }
+            screenshotRequestId = requestId
             var configuration = PHPickerConfiguration(photoLibrary: .shared())
             configuration.filter = .images
             configuration.selectionLimit = 1
@@ -75,25 +77,34 @@ final class XianwaiController: UIViewController, WKScriptMessageHandler, WKNavig
 
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
         picker.dismiss(animated: true)
-        guard let provider = results.first?.itemProvider else { return }
-        guard provider.canLoadObject(ofClass: UIImage.self) else { notify("这张图片暂时无法读取，请尝试 PNG 或 JPG 截图。"); return }
+        guard let requestId = screenshotRequestId else { return }
+        guard let provider = results.first?.itemProvider else { cancelScreenshot(requestId); return }
+        guard provider.canLoadObject(ofClass: UIImage.self) else { cancelScreenshot(requestId); notify("这张图片暂时无法读取，请尝试 PNG 或 JPG 截图。"); return }
         readingImage = true
         provider.loadObject(ofClass: UIImage.self) { [weak self] object, _ in
             guard let image = object as? UIImage else {
-                Task { @MainActor in self?.readingImage = false; self?.notify("无法读取截图，请重新选择。") }
+                Task { @MainActor in self?.readingImage = false; self?.cancelScreenshot(requestId); self?.notify("无法读取截图，请重新选择。") }
                 return
             }
             do {
                 let rows = try ScreenshotRecognizer.recognize(image)
                 Task { @MainActor in
-                    self?.readingImage = false
-                    if rows.isEmpty { self?.notify("没有识别到聊天文字，请选择更清晰的截图。"); return }
-                    self?.webView.callAsyncJavaScript("window.xianwaiReceiveOCR(rows)", arguments: ["rows": rows], in: nil, contentWorld: .page, completionHandler: nil)
+                    guard let self, self.screenshotRequestId == requestId else { return }
+                    self.readingImage = false
+                    if rows.isEmpty { self.cancelScreenshot(requestId); self.notify("没有识别到聊天文字，请选择更清晰的截图。"); return }
+                    self.screenshotRequestId = nil
+                    self.webView.callAsyncJavaScript("window.xianwaiReceiveOCR(rows, requestId)", arguments: ["rows": rows, "requestId": requestId], in: nil, contentWorld: .page, completionHandler: nil)
                 }
             } catch {
-                Task { @MainActor in self?.readingImage = false; self?.notify("截图识别失败。可以稍后重试，或粘贴聊天文字。") }
+                Task { @MainActor in self?.readingImage = false; self?.cancelScreenshot(requestId); self?.notify("截图识别失败。可以稍后重试，或粘贴聊天文字。") }
             }
         }
+    }
+
+    private func cancelScreenshot(_ requestId: String) {
+        guard screenshotRequestId == requestId else { return }
+        screenshotRequestId = nil
+        webView.callAsyncJavaScript("window.xianwaiOCRCancelled(requestId)", arguments: ["requestId": requestId], in: nil, contentWorld: .page, completionHandler: nil)
     }
 
     private func notify(_ text: String) {

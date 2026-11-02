@@ -11,5 +11,9 @@ test('HTTP: static assets, no-key failure, invalid JSON and cross-origin protect
  r=await fetch(url+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'partner',text:'你好'}],targetIndex:0,tone:'warm',note:''})});assert.equal(r.status,503);assert.match((await r.json()).error,/尚未配置/);
  r=await fetch(url+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:'{broken'});assert.equal(r.status,400);
  r=await fetch(url+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://untrusted.example'},body:'{}'});assert.equal(r.status,403);
+ const http=await import('node:http'),payload=Buffer.from(JSON.stringify({messages:[{role:'partner',text:'你'.repeat(2000)}],targetIndex:0,tone:'warm',note:''}));
+ const split=payload.indexOf(Buffer.from('你'))+1;
+ const streamed=await new Promise((resolve,reject)=>{const request=http.request(url+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'}},response=>{response.resume();response.on('end',()=>resolve(response.statusCode));});request.on('error',reject);request.write(payload.subarray(0,split));setTimeout(()=>request.end(payload.subarray(split)),15);});
+ assert.equal(streamed,503,'a split Chinese character at the 2000-character limit must remain valid JSON text');
  r=await fetch(url+'/../.env');assert.equal(r.status,404);
 });

@@ -26,7 +26,7 @@ export function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700
   const payload=scope.pending;scope.pending=null;if(!payload)return scope.running;
   scope.running=scope.running.then(async()=>{
    if(session!==scope||scope.blocked||scope.clearing)return;
-   try{const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
+   try{const serialized=JSON.stringify({...payload,baseRevision:scope.revision});const value=await withRequestTimeout(async signal=>read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:serialized,keepalive:new TextEncoder().encode(serialized).length<60000,signal})),scope.controller.signal);if(session===scope)scope.revision=value.revision;}
    catch(error){if(session!==scope||scope.controller.signal.aborted)return;scope.blocked=true;scope.pending=null;onError(error);}
   });
   return scope.running;

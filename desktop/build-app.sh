@@ -8,7 +8,7 @@ export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/output/cache/clang"
 export SWIFT_MODULECACHE_PATH="$PROJECT_DIR/output/cache/swift"
 SDK_PATH="$(xcrun --show-sdk-path)"
 if [[ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]]; then SDK_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; fi
-swiftc -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" -target arm64-apple-macosx14.0 -O -parse-as-library "$PROJECT_DIR/desktop/XianwaiMac.swift" -o "$APP_DIR/Contents/MacOS/Xianwai" -framework SwiftUI -framework AppKit -framework CoreImage -framework Security
+swiftc -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" -target arm64-apple-macosx14.0 -O -parse-as-library "$PROJECT_DIR/desktop/XianwaiMac.swift" "$PROJECT_DIR/desktop/TunnelReadiness.swift" -o "$APP_DIR/Contents/MacOS/Xianwai" -framework SwiftUI -framework AppKit -framework CoreImage -framework Security
 swiftc -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" -target arm64-apple-macosx14.0 -O "$PROJECT_DIR/desktop/OCR.swift" -o "$APP_DIR/Contents/Resources/xianwai-ocr" -framework AppKit -framework Vision -framework ImageIO
 swift -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" "$PROJECT_DIR/desktop/GenerateIcon.swift" "$PROJECT_DIR/dist/app-icon.png"
 cp "$PROJECT_DIR/dist/app-icon.png" "$APP_DIR/Contents/Resources/app-icon.png"
@@ -24,8 +24,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.hanbin.xianwai</string>
 <key>CFBundleName</key><string>弦外</string>
 <key>CFBundleDisplayName</key><string>弦外</string>
-<key>CFBundleVersion</key><string>4</string>
-<key>CFBundleShortVersionString</key><string>0.3.1</string>
+<key>CFBundleVersion</key><string>5</string>
+<key>CFBundleShortVersionString</key><string>0.3.2</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>app-icon.png</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>

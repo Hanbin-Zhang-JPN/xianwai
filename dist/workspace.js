@@ -32,7 +32,15 @@ export function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={})
   const prior=chats.get(chat.id);
   if(!prior){chats.set(chat.id,chat);continue;}
   if(JSON.stringify(prior)===JSON.stringify(chat))continue;
-  const copy={...chat,id:newId(),title:chat.title.slice(0,24)+'（本机副本）'};chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
+  const sameProfile=['title','name','note','style','subtitle'].every(key=>prior[key]===chat[key]);
+  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text);
+  if(sameProfile&&(prefix(prior.messages,chat.messages)||prefix(chat.messages,prior.messages))){
+   chats.set(chat.id,{...(prior.messages.length>=chat.messages.length?prior:chat),preferredTone:chat.id===device.active?chat.preferredTone:prior.preferredTone});continue;
+  }
+  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&copy.title.replace(/（本机副本）$/,'')===chat.title.replace(/（本机副本）$/,'')&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages)===JSON.stringify(chat.messages));
+  if(priorCopy){if(active===chat.id)active=priorCopy.id;continue;}
+
+  const copy={...chat,id:newId(),title:chat.title.slice(0,24)+'（本机副本）'};if(chats.has(copy.id))throw new Error('生成对话编号失败，请重试。');chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
  }
  for(const item of device.favorites){
   const prior=favorites.get(item.id);
