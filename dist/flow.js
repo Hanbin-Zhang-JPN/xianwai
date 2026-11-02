@@ -64,3 +64,5 @@ export function replyForTone(analysis, tone) {
   const index = TONES.findIndex(item => item.id === tone);
   return analysis.replies.find(reply => reply.tone === tone) || analysis.replies[Math.max(0, index)] || analysis.replies[0];
 }
+
+export function canUndoRecord(record,chat){return !!record&&record.chatId===chat.id&&record.snapshot===JSON.stringify(chat.messages);}

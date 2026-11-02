@@ -128,79 +128,271 @@ function replyForTone(analysis, tone) {
   return analysis.replies.find(reply => reply.tone === tone) || analysis.replies[Math.max(0, index)] || analysis.replies[0];
 }
 
-let activeRequest=null;
-const cache=new Map();
-async function requestAnalysis({endpoint,token,input}){
- await cancelAnalysis();
- const base=endpoint.replace(/\/$/,'');
- const key=JSON.stringify({base,input});
- if(cache.has(key))return cache.get(key);
- const controller=new AbortController(),request={controller,job:null,base,token};activeRequest=request;
- const headers={'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})};
- const deadline=setTimeout(()=>controller.abort(),170000);
- try{
-  let response=await fetch(base+'/api/analyze',{method:'POST',headers,body:JSON.stringify(input),signal:controller.signal});
-  const read=async r=>{let value;try{value=await r.json();}catch{throw new Error('Mac 连接中断或服务返回异常，请重新连接后重试。');}if(!r.ok)throw new Error(value.error||'分析暂时不可用。');return value;};
-  let result=await read(response);
-  if(response.status===202){
-   request.job=result.jobId;
-   const start=Date.now();
-   while(Date.now()-start<165000){
-    await new Promise((resolve,reject)=>{const abort=()=>{clearTimeout(timer);reject(new DOMException('已取消分析','AbortError'));};const timer=setTimeout(()=>{controller.signal.removeEventListener('abort',abort);resolve();},700);if(controller.signal.aborted){clearTimeout(timer);reject(new DOMException('已取消分析','AbortError'));}else controller.signal.addEventListener('abort',abort,{once:true});});
-    response=await fetch(base+'/api/jobs/'+encodeURIComponent(request.job),{headers,signal:controller.signal});
-    result=await read(response);
-    if(result.status==='completed'){result=result.result;break;}
-    if(result.status==='failed')throw new Error(result.error||'AI 分析失败，请重试。');
-   }
-  }
-  if(!result||result.mode!=='ai'||!Array.isArray(result.replies))throw new Error('分析结果尚未完成，请重试。');
-  cache.set(key,result);if(cache.size>30)cache.delete(cache.keys().next().value);
-  return result;
- }finally{clearTimeout(deadline);if(activeRequest===request)activeRequest=null;}
-}
-async function cancelAnalysis(){
- const old=activeRequest;if(!old)return;activeRequest=null;old.controller.abort();
- if(old.job)try{await fetch(old.base+'/api/jobs/'+encodeURIComponent(old.job),{method:'DELETE',headers:{Authorization:'Bearer '+old.token},signal:AbortSignal.timeout(3000)});}catch{}
+function canUndoRecord(record,chat){return !!record&&record.chatId===chat.id&&record.snapshot===JSON.stringify(chat.messages);}
+
+
+const bounded=(value,max,name,fallback)=>{
+ if(value===undefined&&fallback!==undefined)return fallback;
+ if(typeof value!=='string'||value.length>max)throw new Error(`${name}格式不正确。`);
+ return value;
+};
+function normalizeWorkspace(value){
+ if(!value||!Array.isArray(value.chats)||value.chats.length>15||!Array.isArray(value.favorites)||value.favorites.length>300)throw new Error('聊天备份格式或数量不正确，已停止覆盖。');
+ const ids=new Set(),favoriteIds=new Set();
+ const chats=value.chats.map(chat=>{
+  if(!chat||!Array.isArray(chat.messages))throw new Error('聊天备份中的消息格式不正确。');
+  const id=bounded(chat.id,100,'对话编号');if(!id||ids.has(id))throw new Error('聊天备份包含重复或空的对话编号。');ids.add(id);
+  return {id,title:bounded(chat.title,30,'标题'),name:bounded(chat.name,20,'称呼'),note:bounded(chat.note,2000,'关系背景',''),style:bounded(chat.style,1000,'说话习惯',''),preferredTone:['warm','honest','brief'].includes(chat.preferredTone)?chat.preferredTone:'warm',subtitle:bounded(chat.subtitle,100,'对话说明',''),messages:chat.messages.length?validateMessages(chat.messages):[]};
+ });
+ const favorites=value.favorites.map(item=>{
+  if(!item)throw new Error('收藏备份格式不正确。');
+  const id=bounded(item.id,100,'收藏编号');if(!id||favoriteIds.has(id))throw new Error('收藏备份包含重复或空的编号。');favoriteIds.add(id);
+  return {id,text:bounded(item.text,2000,'收藏文字'),label:bounded(item.label,100,'收藏语气',''),name:bounded(item.name,100,'收藏称呼',''),source:bounded(item.source,100,'收藏来源','')};
+ });
+ return {active:ids.has(value.active)?value.active:chats[0]?.id||null,chats,favorites};
 }
 
+function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
+ const device=normalizeWorkspace(local);
+ if(!remote)return {workspace:device,conflictCopies:0};
+ const mac=normalizeWorkspace(remote),chats=new Map(mac.chats.map(c=>[c.id,c])),favorites=new Map(mac.favorites.map(f=>[f.id,f]));
+ let copies=0,active=device.active;
+ for(const chat of device.chats){
+  const placeholder=!chat.messages.length&&!chat.note&&!chat.style&&chat.title==='我的聊天'&&chat.name==='对方'&&chat.subtitle==='常用对话';
+  if(placeholder&&mac.chats.length){if(active===chat.id)active=null;continue;}
+  const prior=chats.get(chat.id);
+  if(!prior){chats.set(chat.id,chat);continue;}
+  if(JSON.stringify(prior)===JSON.stringify(chat))continue;
+  const copy={...chat,id:newId(),title:chat.title.slice(0,24)+'（本机副本）'};chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
+ }
+ for(const item of device.favorites){
+  const prior=favorites.get(item.id);
+  if(!prior)favorites.set(item.id,item);
+  else if(JSON.stringify(prior)!==JSON.stringify(item)){const copy={...item,id:newId(),label:item.label.slice(0,94)+'（本机副本）'};favorites.set(copy.id,copy);copies++;}
+ }
+ if(chats.size>15||favorites.size>300)throw new Error('两边的记录超过容量，已停止自动合并。可取消“保留聊天”后连接，先导出需要的内容。');
+ return {workspace:normalizeWorkspace({active:active||mac.active,chats:[...chats.values()],favorites:[...favorites.values()]}),conflictCopies:copies};
+}
+
+const aborted=()=>new DOMException('已取消分析','AbortError');
+function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=700,timeout=170000}={}){
+ let active=null,cancellation=Promise.resolve();
+ const cache=new Map();
+ const wait=(signal)=>new Promise((resolve,reject)=>{
+  if(signal.aborted){reject(aborted());return;}
+  const abort=()=>{clearTimeout(timer);reject(aborted());};
+  const timer=setTimeout(()=>{signal.removeEventListener('abort',abort);resolve();},pollInterval);
+  signal.addEventListener('abort',abort,{once:true});
+ });
+ async function read(response){
+  let value;try{value=await response.json();}catch{throw new Error('Mac 连接中断或返回异常，请重新连接后重试。');}
+  if(!response.ok)throw Object.assign(new Error(value?.error||'分析暂时不可用。'),{status:response.status});
+  return value;
+ }
+ function stop(request){
+  if(!request)return Promise.resolve();
+  request.controller.abort();
+  if(!request.submitted)return Promise.resolve();
+  request.cleanup ||= fetcher(request.base+'/api/jobs/'+encodeURIComponent(request.remoteId||request.id),{method:'DELETE',headers:{Authorization:'Bearer '+request.token},signal:AbortSignal.timeout(5000)}).catch(()=>{});
+  return request.cleanup;
+ }
+ async function cancel(){const old=active;active=null;cancellation=Promise.all([cancellation,stop(old)]).then(()=>{});await cancellation;}
+ async function request({endpoint,token,input}){
+  const old=active;
+  const current={id:crypto.randomUUID(),controller:new AbortController(),base:endpoint.replace(/\/$/,''),token,submitted:false};
+  active=current;
+  let complete=false;
+  const deadline=setTimeout(()=>current.controller.abort(),timeout);
+  try{
+   await Promise.all([cancellation,stop(old)]);
+   if(current.controller.signal.aborted||active!==current)throw aborted();
+   const key=JSON.stringify({base:current.base,token,input});
+   if(cache.has(key)){complete=true;return cache.get(key);}
+   const headers={'Content-Type':'application/json',Authorization:'Bearer '+token};
+   current.submitted=true;
+   let response=await fetcher(current.base+'/api/analyze',{method:'POST',headers,body:JSON.stringify({...input,requestId:current.id}),signal:current.controller.signal});
+   let result=await read(response);
+   if(response.status===202){
+    current.remoteId=result?.jobId;
+    if(typeof current.remoteId!=='string')throw new Error('分析任务格式不正确，请重试。');
+    while(true){
+     await wait(current.controller.signal);
+     result=await read(await fetcher(current.base+'/api/jobs/'+encodeURIComponent(current.remoteId),{headers,signal:current.controller.signal}));
+     if(result?.status==='completed'){result=result.result;break;}
+     if(result?.status==='cancelled')throw aborted();
+     if(result?.status==='failed')throw new Error(result.error||'AI 分析失败，请重试。');
+    }
+   }
+   if(!result||result.mode!=='ai'||!Array.isArray(result.replies)||result.replies.length!==3||!Array.isArray(result.facts)||!Array.isArray(result.hypotheses))throw new Error('分析结果格式不正确，请重试。');
+   if(current.controller.signal.aborted||active!==current)throw aborted();
+   complete=true;cache.set(key,result);if(cache.size>30)cache.delete(cache.keys().next().value);
+   return result;
+  }catch(error){
+   if(current.controller.signal.aborted)throw aborted();
+   throw error;
+  }finally{
+   clearTimeout(deadline);
+   if(!complete)await stop(current);
+   if(active===current)active=null;
+  }
+ }
+ return {request,cancel,clearCache:()=>cache.clear()};
+}
+const analysisClient=createAnalysisClient();
+
+
+function createWorkspaceSync({fetcher=(...args)=>fetch(...args),delay=700,onError=()=>{}}={}){
+ let session=null;
+ async function read(response){
+  let value;try{value=await response.json();}catch{throw new Error('Mac 备份返回异常，当前设备的记录仍保留。');}
+  if(!response.ok)throw Object.assign(new Error(value?.error||'Mac 备份未能保存。'),{status:response.status});
+  if(!Number.isSafeInteger(value?.revision)||value.revision<0)throw new Error('Mac 备份版本不正确。');
+  return value;
+ }
+ function disconnect(){if(session){clearTimeout(session.timer);session.pending=null;session.controller.abort();}session=null;}
+ function connect({endpoint,token,revision}){
+  disconnect();if(!Number.isSafeInteger(revision)||revision<0)throw new Error('Mac 备份版本不正确。');
+  session={base:endpoint.replace(/\/$/,''),token,revision,controller:new AbortController(),blocked:false,clearing:false,pending:null,running:Promise.resolve()};
+ }
+ function flush(scope=session){
+  if(!scope)return Promise.resolve();clearTimeout(scope.timer);scope.timer=null;
+  const payload=scope.pending;scope.pending=null;if(!payload)return scope.running;
+  scope.running=scope.running.then(async()=>{
+   if(session!==scope||scope.blocked||scope.clearing)return;
+   try{const value=await read(await fetcher(scope.base+'/api/workspace',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({...payload,baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));if(session===scope)scope.revision=value.revision;}
+   catch(error){if(session!==scope||scope.controller.signal.aborted)return;scope.blocked=true;scope.pending=null;onError(error);}
+  });
+  return scope.running;
+ }
+ function schedule(value){
+  const scope=session;if(!scope||scope.blocked||scope.clearing)return;
+  scope.pending=normalizeWorkspace(value);clearTimeout(scope.timer);scope.timer=setTimeout(()=>{void flush(scope);},delay);
+ }
+ async function clear(){
+  const scope=session;if(!scope)throw new Error('Mac 尚未连接，无法删除 Mac 备份。');
+  clearTimeout(scope.timer);scope.timer=null;scope.pending=null;scope.clearing=true;
+  try{
+   await scope.running;
+   if(session!==scope)throw new Error('连接已变更，未删除 Mac 备份。');
+   if(scope.blocked)throw new Error('Mac 备份存在冲突或连接异常，请重新配对后再清除。');
+   const value=await read(await fetcher(scope.base+'/api/workspace',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:'Bearer '+scope.token},body:JSON.stringify({baseRevision:scope.revision}),signal:AbortSignal.any([scope.controller.signal,AbortSignal.timeout(12000)])}));
+   if(session!==scope)throw new Error('连接已变更。');scope.revision=value.revision;return value;
+  }catch(error){scope.blocked=true;throw error;}finally{scope.clearing=false;}
+ }
+ return {connect,disconnect,schedule,flush:()=>flush(),clear};
+}
+
+
+const requestAnalysis=options=>analysisClient.request(options);
+const cancelAnalysis=()=>analysisClient.cancel();
+
 function startCompanion(api){
- const {getState,modal,closeModal,toast,render,showReview,setReviewRows,escape:esc,stopAnalysis}=api;
- let connected=false,ocrAvailable=false,pendingPair=null,ocrTask=null;
+ const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
+ let connected=false,ocrAvailable=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null;
+ const sync=createWorkspaceSync({onError:error=>toast(error.message+' 当前设备的记录仍保留。')});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
- const auth=()=>({'Content-Type':'application/json',Authorization:'Bearer '+getState().token});
- const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw new Error(result.error||'请求失败。');return result;};
- async function health(){const r=await fetch(endpoint()+'/api/health',{headers:auth(),signal:AbortSignal.timeout(12000)});const data=await readJSON(r);connected=data.provider==='codex';ocrAvailable=!!data.ocr;return data;}
+ const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
+ const localWorkspace=()=>{const s=getState();return {active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
+ const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw new Error(result?.error||'请求失败。');return result;};
+ const query=(pair,path,signal)=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal}).then(readJSON);
+ const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}};
+ const forget=()=>{for(const storage of [localStorage,sessionStorage])try{storage.removeItem('xianwai-connection-v1');}catch{}};
+ function rememberPair(pair,remember){forget();try{(remember?localStorage:sessionStorage).setItem('xianwai-connection-v1',JSON.stringify({...pair,live:getState().live}));}catch{toast('浏览器未允许记住连接，下次需重新扫码。');}}
+ function cancelPair(){pairTask?.controller.abort();pairTask=null;}
+ function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;nativeChat=null;}
+ function disconnect(){cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;const s=getState();s.live=false;s.endpoint='';s.token='';}
  function draw(){
   const s=getState(),bench=document.querySelector('.workbench');
   if(bench&&!document.querySelector('.quick-actions')){
    const bar=document.createElement('div');bar.className='quick-actions';
-   bar.innerHTML=`<button class="primary-btn" data-companion="screenshots">导入微信截图</button><button class="outline-btn" data-companion="paste">粘贴一句</button><button class="connection-state" data-companion="connection"><span class="dot"></span>${connected?'Mac 已连接 · 真实 AI':'连接 Mac，启用真实 AI'}</button>`;
-   bench.before(bar);
+   bar.innerHTML=`<button class="primary-btn" data-companion="screenshots">导入微信截图</button><button class="outline-btn" data-companion="paste">粘贴一句</button><button class="connection-state" data-companion="connection"><span class="dot"></span>${connected?(s.live?'Mac 已连接 · 真实 AI':'Mac 已连接 · 本地规则'):'连接 Mac，启用真实 AI'}</button>`;bench.before(bar);
   }
   const badge=document.querySelector('.mode-pill');if(badge&&connected)badge.innerHTML='<span class="dot"></span>'+(s.live?'Codex AI 已连接':'本地规则 · Mac 已连接');
   const spinner=document.querySelector('.analysis-empty .spinner');if(spinner&&!document.querySelector('[data-companion="cancel"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='cancel';b.textContent='取消分析';b.style.marginTop='18px';spinner.parentElement.append(b);}
  }
  window.xianwaiCompanionRendered=draw;window.xianwaiIsConnected=()=>connected;
  window.xianwaiImportScreenshots=()=>chooseImages();
- function connectionHelp(){
-  modal('连接你的 Mac','打开 Mac 上的「弦外」应用，扫描窗口里的二维码，或粘贴配对链接。',`<label for="pair-link">Mac 应用显示的配对链接</label><textarea id="pair-link" placeholder="https://…/#bridge=…&key=…" style="min-height:100px"></textarea><div class="notice">连接后可直接识别截图、调用真实 AI。Mac 需要保持联网与开机。手机用 Safari 打开，再通过“分享 → 添加到主屏幕”进入。</div>`,`<button class="outline-btn" data-action="close-modal">稍后</button><button class="primary-btn" data-companion="parse-pair">连接 Mac</button>`);
- }
+ function connectionHelp(){modal('连接你的 Mac','打开 Mac 上的「弦外」应用，扫描窗口里的二维码，或粘贴配对链接。',`<label for="pair-link">Mac 应用显示的配对链接</label><textarea id="pair-link" placeholder="https://…/#key=…" style="min-height:100px"></textarea><div class="notice">Mac 需要保持联网与开机。手机用 Safari 打开，再通过“分享 → 添加到主屏幕”进入。</div>`,`<button class="outline-btn" data-action="close-modal">稍后</button><button class="primary-btn" data-companion="parse-pair">连接 Mac</button>`);}
  function parsePair(value){const url=new URL(value),hash=new URLSearchParams(url.hash.slice(1));const base=hash.get('bridge')||url.origin,key=hash.get('key');const u=new URL(base);if(!key||!/^[a-f0-9]{64}$/.test(key)||u.username||u.password||u.pathname!=='/'||u.search||u.hash||!(u.protocol==='https:'||(u.protocol==='http:'&&u.hostname==='127.0.0.1')))throw new Error('配对链接不完整，请重新复制 Mac 窗口里的链接。');return{endpoint:base.replace(/\/$/,''),token:key};}
- function pairingModal(pair){pendingPair=pair;const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}只有选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" checked>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">请勿转发配对链接。关闭 Mac 窗口可继续后台运行；从菜单退出后，再打开需重新扫码。</p>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
- async function connect(){const s=getState(),remember=document.querySelector('#remember-pair').checked,save=document.querySelector('#remember-chats').checked;const prev={endpoint:s.endpoint,token:s.token};s.endpoint=pendingPair.endpoint===location.origin?'':pendingPair.endpoint;s.token=pendingPair.token;const button=document.querySelector('[data-companion="connect"]');button.disabled=true;button.textContent='正在连接 Mac…';try{const status=await health();if(!status.ready)throw new Error('Mac 上的 Codex 尚未登录，请先在 ChatGPT 应用登录。');s.live=true;s.analysis=null;s.selected=null;s.persist=save;if(save){const backup=await readJSON(await fetch(endpoint()+'/api/workspace',{headers:auth()}));if(backup.workspace?.chats?.length){const custom=s.chats.filter(c=>!['late','tired','weekend'].includes(c.id));const all=new Map(backup.workspace.chats.map(c=>[c.id,c]));for(const c of custom)all.set(c.id,c);s.chats=[...all.values()].slice(0,15);s.favorites=[...new Map([...backup.workspace.favorites,...s.favorites].map(f=>[f.id,f])).values()].slice(0,300);s.active=s.chats.some(c=>c.id===backup.workspace.active)?backup.workspace.active:s.chats[0].id;s.tone=s.chats.find(c=>c.id===s.active)?.preferredTone||'warm';}}api.persist();if(remember)localStorage.setItem('xianwai-connection-v1',JSON.stringify(pendingPair));else sessionStorage.setItem('xianwai-connection-v1',JSON.stringify(pendingPair));closeModal();render();toast('已连接真实 AI。先补充前情，日常粘贴一句就能帮你回。');}catch(error){s.endpoint=prev.endpoint;s.token=prev.token;connected=false;document.querySelector('#modal-error').textContent=error.message;button.disabled=false;button.textContent='重试连接';}}
- function chooseImages(){if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});return;}if(!connected||!ocrAvailable){connectionHelp();return;}const input=document.createElement('input');input.type='file';input.accept='image/*';input.multiple=true;input.style.display='none';document.body.append(input);input.onchange=()=>{const files=[...input.files];input.remove();importImages(files);};input.addEventListener('cancel',()=>input.remove(),{once:true});input.click();}
+ function pairingModal(pair){pendingPair=pair;const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" checked>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
+ async function connect(pair,options={}){
+  cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;stopAnalysis();
+  const task={controller:new AbortController(),owner:options.owner};pairTask=task;
+  const valid=()=>pairTask===task&&!task.controller.signal.aborted&&(!task.owner||task.owner.isConnected);
+  const timeout=setTimeout(()=>task.controller.abort(),15000);
+  try{
+   const status=await query(pair,'/api/health',task.controller.signal);
+   if(status.provider!=='codex'||!status.ready)throw new Error('Mac 上的 Codex 尚未登录，请先在 ChatGPT 应用登录。');
+   let restored=null,revision=0;
+   if(options.save){const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
+   if(!valid())return;
+   const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
+   if(restored)applyWorkspace(restored.workspace);
+   connected=true;ocrAvailable=!!status.ocr;
+   if(options.save)sync.connect({...pair,revision});
+   rememberPair(pair,options.remember);api.persist();
+   pairTask=null;closeModal();render();toast(restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
+  }catch(error){
+   if(pairTask!==task||(task.owner&&!task.owner.isConnected))return;
+   getState().live=false;
+   const node=task.owner?.querySelector('#modal-error');const message=task.controller.signal.aborted?'连接超时，请检查 Mac 并重试。':error.message;if(node)node.textContent=message;else toast(message);
+   const button=task.owner?.querySelector('[data-companion="connect"]');if(button){button.disabled=false;button.textContent='重试连接';}
+  }finally{clearTimeout(timeout);if(pairTask===task)pairTask=null;}
+ }
+ function chooseImages(){
+  if(window.webkit?.messageHandlers?.xianwai){nativeChat=getState().active;window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});return;}
+  if(!connected||!ocrAvailable){connectionHelp();return;}
+  const chatId=getState().active,input=document.createElement('input');input.type='file';input.accept='image/*';input.multiple=true;input.style.display='none';document.body.append(input);
+  input.onchange=()=>{const files=[...input.files];input.remove();if(getState().active===chatId)void importImages(files,chatId);};input.addEventListener('cancel',()=>input.remove(),{once:true});input.click();
+ }
  async function resize(file){if(file.size>30000000)throw new Error('单张图片不能超过 30 MB。');const url=URL.createObjectURL(file);try{const image=new Image();image.src=url;await image.decode();const ratio=Math.min(1,2400/Math.max(image.naturalWidth,image.naturalHeight));const canvas=document.createElement('canvas');canvas.width=Math.round(image.naturalWidth*ratio);canvas.height=Math.round(image.naturalHeight*ratio);canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);return canvas.toDataURL('image/jpeg',0.88);}finally{URL.revokeObjectURL(url);}}
- async function importImages(files){if(!files.length)return;ocrTask?.abort();const controller=new AbortController();ocrTask=controller;if(files.length>12){toast('每次最多选择 12 张截图。');return;}modal('正在识别聊天截图','截图只发送到你的 Mac 进行识别，识别结束后临时图片会删除。','<div class="ocr-progress"><div class="spinner"></div><p id="ocr-status">正在读取图片…</p></div>');const rows=[],previews=[];try{for(let i=0;i<files.length;i++){document.querySelector('#ocr-status').textContent=`正在识别第 ${i+1} / ${files.length} 张，请稍候…`;const dataUrl=await resize(files[i]);let result;const timer=setTimeout(()=>controller.abort(),60000);try{result=await readJSON(await fetch(endpoint()+'/api/ocr',{method:'POST',headers:auth(),body:JSON.stringify({dataUrl}),signal:controller.signal}));}finally{clearTimeout(timer);}if(controller.signal.aborted)return;rows.push(...result.rows.map(row=>({...row,batch:i})));previews.push(dataUrl);if(rows.length>300)throw new Error('识别超过 300 条，请减少本次截图数量。');}setReviewRows(rows.map(r=>({...r,uncertain:true})));showReview();const preview=document.createElement('details');preview.className='screenshot-preview';preview.innerHTML='<summary>对照原截图 · '+previews.length+' 张</summary>'+previews.map(src=>`<img alt="本次选择的聊天截图" src="${src}">`).join('');document.querySelector('#review-rows').before(preview);toast('识别完成，核对后可直接保存并起草回复。');}catch(error){if(error.name==='AbortError'){toast('已停止这次截图识别。');return;}document.querySelector('.ocr-progress')?.remove();const errorNode=document.querySelector('#modal-error');if(errorNode)errorNode.textContent=error.name==='TimeoutError'?'截图识别超时，请检查 Mac 是否仍在线。':error.message;}}
- async function paste(){try{const text=await navigator.clipboard.readText();if(text.length>2000||(/^(我|对方|她|他|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);}catch{api.quickPaste('');toast('在下方输入框长按粘贴，或按 ⌘V，再点帮我回。');}}
- document.addEventListener('click',async event=>{if(event.target.closest('[data-action="close-modal"]')){ocrTask?.abort();ocrTask=null;}const target=event.target.closest('[data-companion]');if(!target)return;const action=target.dataset.companion;try{if(action==='screenshots')chooseImages();if(action==='paste')paste();if(action==='connection')connectionHelp();if(action==='parse-pair')pairingModal(parsePair(document.querySelector('#pair-link').value.trim()));if(action==='connect')await connect();if(action==='cancel'){await cancelAnalysis();stopAnalysis();toast('已取消分析。');}if(action==='disconnect'){localStorage.removeItem('xianwai-connection-v1');sessionStorage.removeItem('xianwai-connection-v1');connected=false;ocrAvailable=false;const s=getState();s.live=false;s.endpoint='';s.token='';s.analysis=null;closeModal();render();toast('已断开 Mac 连接，聊天与收藏仍在当前设备。');}}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}});
- let backupTimer;
- window.xianwaiPersistWorkspace=s=>{clearTimeout(backupTimer);if(!connected||!s.persist)return;const payload={active:s.active,chats:s.chats,favorites:s.favorites};backupTimer=setTimeout(()=>fetch(endpoint()+'/api/workspace',{method:'POST',headers:auth(),body:JSON.stringify(payload)}).then(readJSON).catch(()=>toast('Mac 备份暂未保存，当前设备的内容仍在。')),700);};
- window.xianwaiDeleteBackup=()=>{clearTimeout(backupTimer);if(connected)fetch(endpoint()+'/api/workspace',{method:'DELETE',headers:auth()}).then(readJSON).catch(()=>toast('Mac 备份未能删除，请在 Mac 联网后重试。'));};
- // Add a clear disconnect action to the existing settings modal.
+ async function importImages(files,chatId){
+  if(!files.length)return;if(files.length>12){toast('每次最多选择 12 张截图。');return;}
+  cancelOCR();modal('正在识别聊天截图','截图发送到你的 Mac 识别，处理后的临时图片会删除。','<div class="ocr-progress"><div class="spinner"></div><p id="ocr-status">正在读取图片…</p></div>');
+  const task={controller:new AbortController(),owner:document.querySelector('#modal-root .modal'),chatId,base:endpoint(),token:getState().token};ocrTask=task;
+  const valid=()=>ocrTask===task&&!task.controller.signal.aborted&&task.owner.isConnected&&getState().active===chatId;
+  const rows=[],previews=[];
+  try{
+   for(let i=0;i<files.length;i++){
+    if(!valid())return;task.owner.querySelector('#ocr-status').textContent=`正在识别第 ${i+1} / ${files.length} 张，请稍候…`;
+    const dataUrl=await resize(files[i]);if(!valid())return;
+    const timer=setTimeout(()=>task.controller.abort(),60000);let result;
+    try{result=await readJSON(await fetch(task.base+'/api/ocr',{method:'POST',headers:auth(task.token),body:JSON.stringify({dataUrl}),signal:task.controller.signal}));}finally{clearTimeout(timer);}
+    if(!valid())return;if(!Array.isArray(result.rows))throw new Error('截图识别返回格式异常，请重试。');
+    rows.push(...result.rows.map(row=>({...row,batch:i})));previews.push(dataUrl);if(rows.length>300)throw new Error('识别超过 300 条，请减少本次截图数量。');
+   }
+   if(!valid())return;ocrTask=null;setReviewRows(rows.map(r=>({...r,uncertain:true})));showReview();
+   const preview=document.createElement('details');preview.className='screenshot-preview';preview.innerHTML='<summary>对照原截图 · '+previews.length+' 张</summary>'+previews.map(src=>`<img alt="本次选择的聊天截图" src="${src}">`).join('');document.querySelector('#review-rows')?.before(preview);toast('识别完成，核对后可保存并起草回复。');
+  }catch(error){if(ocrTask!==task||!task.owner.isConnected)return;task.owner.querySelector('.ocr-progress')?.remove();task.owner.querySelector('#modal-error').textContent=task.controller.signal.aborted?'截图识别已停止或超时，请重新选择截图。':error.message;}finally{if(ocrTask===task)ocrTask=null;}
+ }
+ const nativeReceive=window.xianwaiReceiveOCR;
+ window.xianwaiReceiveOCR=rows=>{const chatId=nativeChat;nativeChat=null;if(chatId&&getState().active===chatId)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
+ async function paste(){try{const text=await navigator.clipboard.readText();if(text.length>2000||(/^(我|对方|她|他|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);}catch{api.quickPaste('');toast('在下方输入框长按粘贴，再点帮我回。');}}
+ document.addEventListener('xianwai-modal-closing',()=>{cancelPair();cancelOCR();});
+ document.addEventListener('xianwai-context-changing',()=>cancelOCR());
+ document.addEventListener('click',async event=>{
+  const target=event.target.closest('[data-companion]');if(!target)return;
+  try{switch(target.dataset.companion){
+   case'screenshots':chooseImages();break;case'paste':await paste();break;case'connection':connectionHelp();break;
+   case'parse-pair':pairingModal(parsePair(document.querySelector('#pair-link').value.trim()));break;
+   case'connect':{const owner=target.closest('.modal'),options={owner,remember:owner.querySelector('#remember-pair').checked,save:owner.querySelector('#remember-chats').checked};target.disabled=true;target.textContent='正在连接 Mac…';await connect({...pendingPair},options);break;}
+   case'cancel':stopAnalysis();await cancelAnalysis();toast('已取消分析。');break;
+   case'disconnect':disconnect();closeModal();render();toast('已断开 Mac 连接，聊天与收藏仍在当前设备。');break;
+  }}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}
+ });
+ window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
+ window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;try{remembered=!!(localStorage.getItem('xianwai-connection-v1')||sessionStorage.getItem('xianwai-connection-v1'));}catch{}if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
+ window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;try{permanent=!!localStorage.getItem('xianwai-connection-v1');}catch{}rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
+ window.xianwaiBeforeSettings=async(candidate,signal)=>{
+  const s=getState();
+  if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
+  if(!candidate.persist){sync.disconnect();return;}
+  if(connected&&!s.persist){const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',AbortSignal.any([signal,AbortSignal.timeout(12000)]));if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+ };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));
  if(hash.has('key')){try{const pair=parsePair(location.href);history.replaceState(null,'',location.pathname+location.search);pairingModal(pair);}catch(error){toast(error.message);}}
- else{let saved;try{saved=JSON.parse(localStorage.getItem('xianwai-connection-v1')||sessionStorage.getItem('xianwai-connection-v1')||'null');if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved){const s=getState();s.endpoint=saved.endpoint===location.origin?'':saved.endpoint;s.token=saved.token;s.live=true;s.analysis=null;s.selected=null;health().then(status=>{if(!status.ready)toast('Mac 上的 Codex 暂不可用，请检查登录。');render();}).catch(()=>{toast('Mac 暂未连接，请打开 Mac 上的弦外并重新扫码。');render();});}}
+ else{let saved,remember=true,savedLive=true;try{const local=localStorage.getItem('xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||sessionStorage.getItem('xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
  draw();
 }
 
@@ -217,11 +409,12 @@ const samples=[sample('late','晚归的约定','小满','关于陪伴与期待',
 ])];
 const freshChat={id:crypto.randomUUID(),title:'我的聊天',name:'对方',subtitle:'常用对话',note:'',style:'',preferredTone:'warm',messages:[]};
 let state={chats:[freshChat,...structuredClone(samples)],active:freshChat.id,page:'chat',selected:null,tone:'warm',replyDrafts:{},analysis:null,favorites:[],persist:false,live:false,endpoint:'',token:'',loading:false,mobileSheet:false};
-try{const saved=JSON.parse(localStorage.getItem('xianwai-v1')||'null');if(saved?.persist){const chats=saved.chats.filter(c=>typeof c.id==='string'&&typeof c.name==='string'&&typeof c.title==='string'&&typeof c.note==='string'&&(c.messages.length===0||validateMessages(c.messages)));if(chats.length){state={...state,chats,active:chats.some(c=>c.id===saved.active)?saved.active:chats[0].id,selected:null,favorites:Array.isArray(saved.favorites)?saved.favorites.filter(f=>typeof f.text==='string'&&typeof f.id==='string'):[],persist:true};}}}catch{}
-const $=(s,root=document)=>root.querySelector(s);const current=()=>state.chats.find(c=>c.id===state.active)||state.chats[0];let generation=0,toastTimer,reviewRows=[];
+let localRecovery=null;
+try{const raw=localStorage.getItem('xianwai-v1');if(raw){try{const saved=JSON.parse(raw);if(saved?.persist){const workspace=normalizeWorkspace(saved);if(!workspace.chats.length)throw new Error();state={...state,...workspace,persist:true};}}catch{localRecovery=raw;}}}catch{}
+const $=(s,root=document)=>root.querySelector(s);const current=()=>state.chats.find(c=>c.id===state.active)||state.chats[0];let generation=0,toastTimer,reviewRows=[],clearing=false;
 state.tone=current().preferredTone||'warm';
 function adoptCurrent(){const c=current();if(samples.some(sample=>sample.id===c.id)){c.id=crypto.randomUUID();state.active=c.id;c.title='我的聊天';c.name='对方';c.subtitle='已导入的聊天';}return c;}
-function persist(){window.xianwaiPersistWorkspace?.(state);try{if(state.persist)localStorage.setItem('xianwai-v1',JSON.stringify({persist:true,active:state.active,chats:state.chats,favorites:state.favorites}));else localStorage.removeItem('xianwai-v1');}catch{toast('浏览器未允许保存，内容仍保留在当前页面。');}}
+function persist(){if(clearing)return;if(localRecovery){toast('本机旧记录格式异常，已保留原文件。请在设置中下载后清除。');return;}window.xianwaiPersistWorkspace?.(state);try{if(state.persist)localStorage.setItem('xianwai-v1',JSON.stringify({persist:true,active:state.active,chats:state.chats,favorites:state.favorites}));else localStorage.removeItem('xianwai-v1');}catch{toast('浏览器未允许保存，内容仍保留在当前页面。');}}
 function toast(t){const node=$('#toast');node.textContent=t;node.classList.add('toast-show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('toast-show'),3200);}
 function header(title,sub,eyebrow='A LITTLE CLOSER',button='import'){return `<div class="workspace-header"><div><div class="eyebrow">${eyebrow}</div><h1>${esc(title)}</h1><p>${esc(sub)}</p></div>${button?`<button class="outline-btn" data-action="${button}">${icon('upload')}导入聊天</button>`:''}</div>`;}
 function render(){const c=current();$('#app').innerHTML=`<div class="app-shell"><aside class="sidebar" id="sidebar"><div class="brand"><span class="brandmark">${icon('chat')}</span><div><strong>弦外</strong><small>BETWEEN THE LINES</small></div></div><button class="new-chat" data-action="new">${icon('plus')}开启一段对话</button><nav aria-label="主导航">${[['chat','chat','聊天工作台'],['favorites','heart','回复收藏'],['guide','book','使用指南']].map(([id,i,label])=>`<button class="nav-item ${state.page===id?'active':''}" data-page="${id}">${icon(i)}${label}${id==='favorites'?`<span class="count">${state.favorites.length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-label">我的对话</div><div>${state.chats.map(chat=>`<button class="conversation ${chat.id===c.id&&state.page==='chat'?'active':''}" data-chat="${esc(chat.id)}"><span class="avatar ${chat.id==='late'?'peach':''}">${esc(chat.name.slice(0,1))}</span><span><strong>${esc(chat.title)}</strong><small>${chat.messages.length} 条消息 · ${chat.id==='late'?'示例':chat.id==='tired'||chat.id==='weekend'?'示例':'我的对话'}</small></span></button>`).join('')}</div><div class="sidebar-bottom"><div class="privacy-card">${icon('shield')}<p>${state.persist?'已开启本机保存':'聊天默认只在当前页面'}<br>每一次理解，都值得被保护。</p></div><button class="settings-btn" data-action="settings">${icon('settings')}设置与隐私</button></div></aside><main class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="打开导航">${icon('menu')}</button><span>沟通，有回声。</span><span>/</span><span>${state.page==='chat'?'聊天工作台':state.page==='favorites'?'回复收藏':'使用指南'}</span></div><div class="top-actions"><button class="mode-pill" data-action="settings"><span class="dot"></span>${state.live?'AI 服务已选择':'本地试用'}</button><button class="icon-btn" data-page="guide" aria-label="使用指南">${icon('book')}</button><span class="header-avatar">我</span></div></header>${state.page==='chat'?renderChat():state.page==='favorites'?renderFavorites():renderGuide()}</main></div>`;if(state.page==='chat'){renderAnalysis();const box=$('.chat-messages');if(box)box.scrollTop=box.scrollHeight;}bindLongPress();window.xianwaiCompanionRendered?.();}
@@ -240,7 +433,7 @@ function renderChat(){
   </div>
   <div class="chat-tip">${icon('shield')}复制草稿不会自动记为已发送</div>
   <form class="composer quick-composer" id="composer"><select name="role" aria-label="添加消息的发送者"><option value="partner">对方</option><option value="me">我</option></select><textarea name="message" aria-label="对方刚发的消息" placeholder="粘贴对方刚发的一句…" maxlength="2000" rows="2"></textarea><button type="submit" aria-label="帮我回这句话">帮我回 ${icon('arrow')}</button></form>
-  ${state.undoRecord?.chatId===c.id&&c.messages.length===state.undoRecord.length?'<button class="undo-record" data-action="undo-record">撤销刚才的“已发出”记录</button>':''}
+  ${canUndoRecord(state.undoRecord,c)?'<button class="undo-record" data-action="undo-record">撤销刚才的“已发出”记录</button>':''}
  </section><div class="analysis-scrim ${state.mobileSheet?'open':''}" data-action="close-analysis"></div><section class="analysis-panel ${state.mobileSheet?'open':''}" aria-label="消息分析" id="analysis"></section></div>`;
 }
 function renderAnalysis(){
@@ -270,10 +463,11 @@ function citations(ids){return(ids||[]).map(id=>`<button class="citation" data-r
 function renderFavorites(){return `${header('留住，好好说话的时刻。','收藏的回复只属于你的工作台。','WORDS TO KEEP',null)}<div class="page-content">${state.favorites.length?state.favorites.map(f=>`<article class="collection-item"><small>${esc(f.name)} · ${esc(f.label)}</small><p>${esc(f.text)}</p><footer><small>${esc(f.source||'自定义回复')}</small><button class="outline-btn" data-fav-copy="${esc(f.id)}">${icon('copy')}复制</button><button class="icon-btn" data-fav-remove="${esc(f.id)}" aria-label="移除收藏">${icon('trash')}</button></footer></article>`).join(''):`<div class="empty-state"><h2>一句合适的话，值得留下</h2><p>在回复建议旁点击爱心，即可收藏。<br>${state.persist?'本机保存已开启。':'默认关闭页面后清除，可在设置中开启本机保存。'}</p><button class="primary-btn" data-page="chat">回到聊天工作台 ${icon('arrow')}</button></div>`}</div>`;}
 function renderGuide(){return `${header('靠近，从听懂开始。','用工具留意语境，用真实的沟通确认彼此。','A SMALL GUIDE',null)}<div class="page-content"><div class="reading-grid">${[['01','把语境放在一起','先粘贴带发送者的聊天文本，或导入 TXT / JSON。最多 300 条、80,000 字，不会静默截断。导入前可逐条核对说话人。','连接 Mac 后，网页可从相册批量选择微信截图，在 Mac 使用 Apple Vision 识别。识别后先核对顺序、发送者和文字，再分析。'],['02','选中你想回应的那一句','在本工作台里长按、点击消息，或用键盘选中后按 Enter。分析使用目标消息及之前的全部已导入内容，可补充关系背景。','iOS 的应用隔离限制了跨 App 读取。这个版本不会读取微信后台，也不能在微信原有的长按菜单中添加功能。'],['03','先看依据，再选怎么说','分析把原话和可能的解释分开。点击“原话”可定位消息。没有单句消息能证明一个人的真实心思。','用温柔、坦诚、简短三种语气起草回复。根据自己的真实情况编辑后复制，再回微信发送；不要承诺做不到的事。'],['04','让私密内容由你决定','未配对时默认只在当前页面保留内容。配对时可选择保存到当前设备与 Mac，下次连接可以恢复，也可主动清除。','手机扫码连接 Mac 可复用已登录的 Codex，无需密钥。截图通过 Cloudflare 连接到 Mac；选择分析时相关文字发送给 OpenAI。模型结果可能不准确。']].map(([n,t,p,q])=>`<article class="reading-card"><div class="step">${n}</div><h2>${t}</h2><p>${p}</p><p>${q}</p></article>`).join('')}</div></div>`;}
 async function analyze(index,open=true){const c=current();if(!c.messages[index])return;state.selected=index;state.mobileSheet=open;state.analysisError='';state.replyDrafts={};const seq=++generation;state.loading=state.live;state.analysis=null;render();if(!state.live){state.analysis=localAnalysis(c.messages,index,state.tone);renderAnalysis();return;}try{const base=state.endpoint.replace(/\/$/,'');if(base){const u=new URL(base);if(u.protocol!=='https:'&&!(u.protocol==='http:'&&['localhost','127.0.0.1'].includes(u.hostname)))throw new Error('AI 服务请使用 HTTPS 地址。');}const a=await requestAnalysis({endpoint:base,token:state.token,input:{messages:c.messages.slice(0,index+1),targetIndex:index,tone:'warm',note:c.note||'',style:c.style||''}});if(seq!==generation)return;if(!a||a.mode!=='ai'||!Array.isArray(a.replies))throw new Error('服务返回的分析格式不正确。');state.analysis=a;}catch(err){if(seq!==generation)return;state.analysisError=err.name==='TimeoutError'?'分析超时，请稍后重试。':err.message;toast(state.analysisError);}finally{if(seq===generation){state.loading=false;renderAnalysis();window.xianwaiCompanionRendered?.();}}}
-function selectChat(id){generation++;state.active=id;state.page='chat';state.selected=null;state.analysis=null;state.replyDrafts={};state.tone=current().preferredTone||'warm';state.loading=false;state.mobileSheet=false;persist();render();}
-function modal(title,intro,body,footer=''){const root=$('#modal-root');root.innerHTML=`<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭窗口">${icon('close')}</button></div><p class="intro">${intro}</p>${body}<div class="error" id="modal-error" role="alert"></div><div class="modal-footer">${footer}</div></section></div>`;const focusable=root.querySelectorAll('button,input,textarea,select');setTimeout(()=>focusable[1]?.focus(),20);}
-function closeModal(){$('#modal-root').innerHTML='';}
-function modalError(t){$('#modal-error').textContent=t;}
+function invalidate(){generation++;void cancelAnalysis();state.loading=false;state.analysis=null;state.selected=null;state.replyDrafts={};state.undoRecord=null;state.analysisError='';document.dispatchEvent(new Event('xianwai-context-changing'));}
+function selectChat(id){invalidate();closeModal();state.active=id;state.page='chat';state.selected=null;state.analysis=null;state.replyDrafts={};state.tone=current().preferredTone||'warm';state.loading=false;state.mobileSheet=false;persist();render();}
+function modal(title,intro,body,footer=''){if(clearing)return;document.dispatchEvent(new Event('xianwai-modal-closing'));const root=$('#modal-root');root.innerHTML=`<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭窗口">${icon('close')}</button></div><p class="intro">${intro}</p>${body}<div class="error" id="modal-error" role="alert"></div><div class="modal-footer">${footer}</div></section></div>`;const focusable=root.querySelectorAll('button,input,textarea,select');setTimeout(()=>focusable[1]?.focus(),20);}
+function closeModal(){if(clearing)return;document.dispatchEvent(new Event('xianwai-modal-closing'));$('#modal-root').innerHTML='';}
+function modalError(t){const node=$('#modal-error');if(node)node.textContent=t;else toast(t);}
 function openImport(raw=''){modal('把聊天带进来','粘贴一段聊天，再核对说话人。仅替换当前对话，最多 300 条。',`<label for="transcript">聊天内容</label><textarea id="transcript" placeholder="我：今晚一起吃饭？&#10;对方：好呀，我等你。&#10;我：临时有个会，可能晚一点。">${esc(raw)}</textarea><div class="import-tools"><button class="outline-btn" data-action="choose-file">${icon('upload')}TXT / JSON 文件</button><button class="outline-btn" data-action="screenshot">${icon('photo')}截图识别</button></div><input id="file-input" type="file" accept=".txt,.json,text/plain,application/json" hidden><div class="notice">没有标记发送者的行会暂记为“对方”并高亮，请在下一步确认。请只导入你有权使用的内容，先移除不必要的私人信息。</div>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="parse">下一步 · 核对消息 ${icon('arrow')}</button>`);}
 function showReview(){
  const priorAppend=$('#append-import')?.checked,priorDedupe=$('#dedupe-import')?.checked,originals=$('.screenshot-preview')?.outerHTML||'';
@@ -287,10 +481,10 @@ function showReview(){
 }
 function reviewPlan(){return prepareImport(current().messages,collectRows(),{append:!!$('#append-import')?.checked,removeOverlap:$('#dedupe-import')?.checked!==false});}
 function updateReviewSummary(){const node=$('#import-summary');if(!node)return;try{const plan=reviewPlan();node.textContent=`保存后共 ${plan.messages.length} 条语境${plan.totalOverlap?' · 发现 '+plan.totalOverlap+' 条完全重叠，'+($('#dedupe-import').checked?'将合并':'保留全部'):''}。最后一句是${plan.messages.at(-1).role==='partner'?'对方的消息，可直接起草回复':'你发出的消息，会先保存前情'}。`;}catch(error){node.textContent=error.message;}}
-async function confirmImport(reply=false){try{const plan=reviewPlan();adoptCurrent().messages=plan.messages;generation++;state.selected=null;state.analysis=null;state.replyDrafts={};persist();closeModal();render();if(reply&&plan.messages.at(-1).role==='partner')await analyze(plan.messages.length-1);else toast(`已保存 ${plan.messages.length} 条${plan.removed||plan.screenshotOverlap?'，已合并完全重叠的前文':''}。`);}catch(error){modalError(error.message);}}
+async function confirmImport(reply=false){try{const plan=reviewPlan();invalidate();adoptCurrent().messages=plan.messages;state.selected=null;state.analysis=null;state.replyDrafts={};persist();closeModal();render();if(reply&&plan.messages.at(-1).role==='partner')await analyze(plan.messages.length-1);else toast(`已保存 ${plan.messages.length} 条${plan.removed||plan.screenshotOverlap?'，已合并完全重叠的前文':''}。`);}catch(error){modalError(error.message);}}
 
 function collectRows(){return [...document.querySelectorAll('.review-row')].map((r,i)=>({...reviewRows[i],role:$('select',r).value,text:$('textarea',r).value}));}
-function settings(){const paired=window.xianwaiIsConnected?.();modal('让理解，按你的方式发生',paired?'已通过 Mac 连接 Codex，不需要模型密钥。':'扫码连接 Mac，即可识别截图并使用真实 AI。',`<label class="checkbox-row"><input type="checkbox" id="persist" ${state.persist?'checked':''}>保存聊天与收藏${paired?'到当前设备和 Mac':''}（未加密）</label><label class="checkbox-row"><input type="checkbox" id="live" ${state.live?'checked':''}>使用在线 AI 分析（相关文字和背景会发送给模型服务）</label><div class="notice">${paired?'截图通过加密连接送到你的 Mac 进行识别；分析文字通过 Codex 发送给 OpenAI，并使用你的当前账户额度。退出 Mac 应用后需重新扫码；关闭窗口不会断开。':'在 Mac 上打开弦外应用，扫描二维码即可配对。不连接时仍可使用明确标注的本地规则提示。'}</div><details><summary style="font-size:11px;color:#839373;margin-top:18px;cursor:pointer">高级连接设置</summary><label for="endpoint">后端地址</label><input id="endpoint" type="url" value="${esc(state.endpoint)}" placeholder="留空使用当前站点"><label for="token">访问令牌</label><input id="token" type="password" value="${esc(state.token)}" autocomplete="off" placeholder="配对时自动填写"></details><button class="danger-btn" data-action="clear">清除当前设备与 Mac 备份中的聊天和收藏…</button>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="save-settings">保存设置 ${icon('check')}</button>`);}
+function settings(){const paired=window.xianwaiIsConnected?.();modal('让理解，按你的方式发生',paired?'已通过 Mac 连接 Codex，不需要模型密钥。':'扫码连接 Mac，即可识别截图并使用真实 AI。',`<label class="checkbox-row"><input type="checkbox" id="persist" ${state.persist?'checked':''}>保存聊天与收藏${paired?'到当前设备和 Mac':''}（未加密）</label><label class="checkbox-row"><input type="checkbox" id="live" ${state.live?'checked':''}>使用在线 AI 分析（相关文字和背景会发送给模型服务）</label><div class="notice">${paired?'截图通过加密连接送到你的 Mac 进行识别；分析文字通过 Codex 发送给 OpenAI，并使用你的当前账户额度。退出 Mac 应用后需重新扫码；关闭窗口不会断开。':'在 Mac 上打开弦外应用，扫描二维码即可配对。不连接时仍可使用明确标注的本地规则提示。'}</div><details><summary style="font-size:11px;color:#839373;margin-top:18px;cursor:pointer">高级连接设置</summary><label for="endpoint">后端地址</label><input id="endpoint" type="url" value="${esc(state.endpoint)}" placeholder="留空使用当前站点"><label for="token">访问令牌</label><input id="token" type="password" value="${esc(state.token)}" autocomplete="off" placeholder="配对时自动填写"></details>${localRecovery?'<div class="notice">旧记录格式异常，原始内容已保留。请先下载备份，再清除。</div><button class="outline-btn" data-action="download-recovery">下载原始记录备份</button>':''}<button class="danger-btn" data-action="clear">清除当前设备与 Mac 备份中的聊天和收藏…</button>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="save-settings">保存设置 ${icon('check')}</button>`);}
 function editProfile(){
  const c=current();modal('让回复更像你自己','事实背景只填一次；说话习惯会用于后续起草。',`
  <label for="chat-title">对话标题</label><input id="chat-title" maxlength="30" value="${esc(c.title)}">
@@ -301,21 +495,21 @@ function editProfile(){
  `<button class="outline-btn" data-action="export">${icon('download')}导出聊天</button><button class="primary-btn" data-action="save-profile">保存习惯与背景</button>`);
 }
 async function copyText(t){if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'copy',text:t});toast('已复制，回微信前再确认一下语气。');return;}try{await navigator.clipboard.writeText(t);toast('已复制，回微信前再确认一下语气。');}catch{modal('复制这句话','浏览器未允许自动复制，可选择下面的文字手动复制。',`<textarea id="manual-copy">${esc(t)}</textarea>`,`<button class="primary-btn" data-action="close-modal">完成</button>`);$('#manual-copy').select();}}
-document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-action]');if(!b)return;const action=b.dataset.action;if(b.dataset.page){state.page=b.dataset.page;state.mobileSheet=false;render();return;}if(b.dataset.chat){selectChat(b.dataset.chat);return;}if(b.dataset.message!==undefined){analyze(Number(b.dataset.message));return;}if(b.dataset.ref!==undefined){if(matchMedia('(max-width:950px)').matches){state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');}const msg=$('#msg-'+b.dataset.ref);msg?.scrollIntoView({behavior:'smooth',block:'center'});msg?.animate([{opacity:.4},{opacity:1}],{duration:600});return;}if(b.dataset.tone){state.tone=b.dataset.tone;current().preferredTone=state.tone;persist();renderAnalysis();return;}if(b.dataset.copy!==undefined){copyText(state.analysis.replies[Number(b.dataset.copy)].text);return;}if(b.dataset.edit!==undefined){const r=state.analysis.replies[Number(b.dataset.edit)];modal('改成你自己的话','先确认回复符合真实情况，再复制发送。',`<textarea id="edit-reply">${esc(r.text)}</textarea>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="copy-edited">${icon('copy')}复制编辑后的回复</button>`);return;}if(b.dataset.save!==undefined){const r=state.analysis.replies[Number(b.dataset.save)],existing=state.favorites.find(f=>f.text===r.text);if(existing)state.favorites=state.favorites.filter(f=>f.id!==existing.id);else state.favorites.unshift({id:crypto.randomUUID(),text:r.text,label:r.label,name:current().name,source:current().title});persist();renderAnalysis();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast(existing?'已移除收藏':'已收藏这句话');return;}if(b.dataset.favCopy){copyText(state.favorites.find(f=>f.id===b.dataset.favCopy).text);return;}if(b.dataset.favRemove){state.favorites=state.favorites.filter(f=>f.id!==b.dataset.favRemove);persist();render();return;}if(b.dataset.moveRow!==undefined){reviewRows=collectRows();const from=Number(b.dataset.moveRow),to=from+Number(b.dataset.direction);if(to>=0&&to<reviewRows.length)[reviewRows[from],reviewRows[to]]=[reviewRows[to],reviewRows[from]];showReview();return;}if(b.dataset.removeRow!==undefined){reviewRows=collectRows();reviewRows.splice(Number(b.dataset.removeRow),1);showReview();return;}
-switch(action){case'menu':$('#sidebar').classList.toggle('open');break;case'import':openImport();break;case'close-modal':closeModal();break;case'settings':settings();break;case'profile':editProfile();break;case'close-analysis':state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');break;case'new':{if(state.chats.length>=15){toast('最多保留 15 段对话，请先导出并清理。');break;}const c={id:crypto.randomUUID(),title:'新的对话',name:'对方',subtitle:'给彼此多一点理解',note:'',messages:[]};state.chats.unshift(c);persist();selectChat(c.id);openImport();break;}case'choose-file':$('#file-input').click();break;case'parse':try{reviewRows=parseTranscript($('#transcript').value);showReview();}catch(err){modalError(err.message);}break;case'back-import':{reviewRows=collectRows();openImport(reviewRows.map(r=>(r.role==='me'?'我':'对方')+'：'+r.text).join('\n'));break;}case'confirm-import':await confirmImport(false);break;case'import-and-reply':await confirmImport(true);break;case'swap-review':reviewRows=collectRows().map(r=>({...r,role:r.role==='me'?'partner':'me'}));showReview();break;case'reply-latest':{const i=latestPartnerIndex(current().messages);if(i>=0)analyze(i);break;}case'copy-draft':await copyText($('#reply-draft').value);break;case'save-draft':{const text=$('#reply-draft').value.trim();if(text&&!state.favorites.some(f=>f.text===text)){state.favorites.unshift({id:crypto.randomUUID(),text,label:TONES.find(t=>t.id===state.tone)?.label||'草稿',name:current().name,source:current().title});persist();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast('已收藏你编辑后的草稿。');}break;}case'record-draft':{const c=current(),text=$('#reply-draft').value.trim();try{const result=addQuickMessage(c.messages,text,'me');c.messages=result.messages;state.undoRecord=result.reused?null:{chatId:c.id,length:c.messages.length,analysis:state.analysis,selected:state.selected,tone:state.tone,drafts:{...state.replyDrafts}};state.selected=null;state.analysis=null;state.mobileSheet=false;persist();render();toast(result.reused?'这句已经在前文中。':'已记录为你发出的消息，下次会一起参考。');}catch(error){toast(error.message);}break;}case'undo-record':{const c=current();if(state.undoRecord?.chatId===c.id&&state.undoRecord.length===c.messages.length){c.messages.pop();const undo=state.undoRecord;state.undoRecord=null;state.analysis=undo.analysis;state.selected=undo.selected;state.tone=undo.tone;state.replyDrafts=undo.drafts;state.mobileSheet=true;persist();render();toast('已撤销记录，编辑过的草稿也已恢复。');}break;}case'screenshot':if(window.xianwaiImportScreenshots){window.xianwaiImportScreenshots();}else if(window.webkit?.messageHandlers?.xianwai){toast('正在打开相册，图片将在本机识别。');window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});}else{modal('在 iPhone 上识别截图','网页原型暂不识别图片。iPhone 源码版内置 Apple Vision 本机文字识别。',`<div class="notice">在 iPhone App 的“导入聊天 → 截图识别”中，从相册选择截图。识别后的文字先进入核对界面，不会自动上传。网页可以粘贴已有文字，或导入 TXT / JSON。</div>`,`<button class="primary-btn" data-action="import">返回文字导入</button>`);}break;case'save-settings':{const endpoint=$('#endpoint').value.trim().replace(/\/$/,'');if(endpoint){try{const u=new URL(endpoint);if(u.username||u.password||u.search||u.hash||u.pathname!=='/'||(u.protocol!=='https:'&&!(u.protocol==='http:'&&['127.0.0.1','localhost'].includes(u.hostname))))throw new Error();}catch{modalError('请输入不带路径和参数的 HTTPS 后端地址，本机可用 http://localhost:4388。');break;}}state.persist=$('#persist').checked;state.live=$('#live').checked;state.endpoint=endpoint;state.token=$('#token').value.trim();generation++;state.loading=false;state.analysis=null;persist();closeModal();if(state.selected!==null)analyze(state.selected,false);else render();toast(state.live?'已开启在线 AI，聊天将发送至你配置的服务。':'已切换为本地规则试用');break;}case'save-profile':{const c=current();c.title=$('#chat-title').value.trim()||'新的对话';c.name=$('#partner-name').value.trim()||'对方';c.note=$('#context-note').value.trim();c.style=$('#reply-style').value.trim();c.preferredTone=$('#preferred-tone').value;state.tone=c.preferredTone;persist();closeModal();state.analysis=null;state.selected=null;render();toast('已保存，下一次起草会参考你的习惯。');break;}case'copy-edited':copyText($('#edit-reply').value);break;case'retry':if(state.selected!==null)analyze(state.selected);break;case'export':{const c=current(),data=JSON.stringify(c.messages,null,2);if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'export',text:data});break;}const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='弦外-聊天.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('已导出聊天 JSON');break;}case'clear':modal('清除这台设备的内容','这会删除当前工作台的聊天和收藏、已连接 Mac 的备份，并关闭保存。请先导出需要保留的聊天。',`<div class="notice">无法撤销此操作。清除后显示的三个对话是虚构示例，不包含你的内容。</div>`,`<button class="outline-btn" data-action="settings">返回设置</button><button class="primary-btn" data-action="confirm-clear">确认清除</button>`);break;case'confirm-clear':window.xianwaiDeleteBackup?.();generation++;state={...state,chats:structuredClone(samples),favorites:[],persist:false,active:'late',selected:null,analysis:null,loading:false,page:'chat',mobileSheet:false,live:false,endpoint:'',token:''};persist();closeModal();render();toast('已清除本机聊天与收藏。');break;}});
+document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-action]');if(!b)return;const action=b.dataset.action;if(b.dataset.page){state.page=b.dataset.page;state.mobileSheet=false;render();return;}if(b.dataset.chat){selectChat(b.dataset.chat);return;}if(b.dataset.message!==undefined){analyze(Number(b.dataset.message));return;}if(b.dataset.ref!==undefined){if(matchMedia('(max-width:950px)').matches){state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');}const msg=$('#msg-'+b.dataset.ref);msg?.scrollIntoView({behavior:'smooth',block:'center'});msg?.animate([{opacity:.4},{opacity:1}],{duration:600});return;}if(b.dataset.tone){state.tone=b.dataset.tone;current().preferredTone=state.tone;persist();renderAnalysis();return;}if(b.dataset.copy!==undefined){copyText(state.analysis.replies[Number(b.dataset.copy)].text);return;}if(b.dataset.edit!==undefined){const r=state.analysis.replies[Number(b.dataset.edit)];modal('改成你自己的话','先确认回复符合真实情况，再复制发送。',`<textarea id="edit-reply">${esc(r.text)}</textarea>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="copy-edited">${icon('copy')}复制编辑后的回复</button>`);return;}if(b.dataset.save!==undefined){const r=state.analysis.replies[Number(b.dataset.save)],existing=state.favorites.find(f=>f.text===r.text);if(!existing&&state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');return;}if(existing)state.favorites=state.favorites.filter(f=>f.id!==existing.id);else state.favorites.unshift({id:crypto.randomUUID(),text:r.text,label:r.label,name:current().name,source:current().title});persist();renderAnalysis();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast(existing?'已移除收藏':'已收藏这句话');return;}if(b.dataset.favCopy){copyText(state.favorites.find(f=>f.id===b.dataset.favCopy).text);return;}if(b.dataset.favRemove){state.favorites=state.favorites.filter(f=>f.id!==b.dataset.favRemove);persist();render();return;}if(b.dataset.moveRow!==undefined){reviewRows=collectRows();const from=Number(b.dataset.moveRow),to=from+Number(b.dataset.direction);if(to>=0&&to<reviewRows.length)[reviewRows[from],reviewRows[to]]=[reviewRows[to],reviewRows[from]];showReview();return;}if(b.dataset.removeRow!==undefined){reviewRows=collectRows();reviewRows.splice(Number(b.dataset.removeRow),1);showReview();return;}
+switch(action){case'menu':$('#sidebar').classList.toggle('open');break;case'import':openImport();break;case'close-modal':closeModal();break;case'settings':settings();break;case'profile':editProfile();break;case'close-analysis':state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');break;case'new':{if(state.chats.length>=15){toast('最多保留 15 段对话，请先导出并清理。');break;}const c={id:crypto.randomUUID(),title:'新的对话',name:'对方',subtitle:'给彼此多一点理解',note:'',messages:[]};state.chats.unshift(c);persist();selectChat(c.id);openImport();break;}case'choose-file':$('#file-input').click();break;case'parse':try{reviewRows=parseTranscript($('#transcript').value);showReview();}catch(err){modalError(err.message);}break;case'back-import':{reviewRows=collectRows();openImport(reviewRows.map(r=>(r.role==='me'?'我':'对方')+'：'+r.text).join('\n'));break;}case'confirm-import':await confirmImport(false);break;case'import-and-reply':await confirmImport(true);break;case'swap-review':reviewRows=collectRows().map(r=>({...r,role:r.role==='me'?'partner':'me'}));showReview();break;case'reply-latest':{const i=latestPartnerIndex(current().messages);if(i>=0)analyze(i);break;}case'copy-draft':await copyText($('#reply-draft').value);break;case'save-draft':{if(state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');break;}const text=$('#reply-draft').value.trim();if(text&&!state.favorites.some(f=>f.text===text)){state.favorites.unshift({id:crypto.randomUUID(),text,label:TONES.find(t=>t.id===state.tone)?.label||'草稿',name:current().name,source:current().title});persist();const count=$('.nav-item .count');if(count)count.textContent=state.favorites.length;toast('已收藏你编辑后的草稿。');}break;}case'record-draft':{const c=adoptCurrent(),text=$('#reply-draft').value.trim();try{const result=addQuickMessage(c.messages,text,'me');c.messages=result.messages;state.undoRecord=result.reused?null:{chatId:c.id,snapshot:JSON.stringify(c.messages),analysis:state.analysis,selected:state.selected,tone:state.tone,drafts:{...state.replyDrafts}};state.selected=null;state.analysis=null;state.mobileSheet=false;persist();render();toast(result.reused?'这句已经在前文中。':'已记录为你发出的消息，下次会一起参考。');}catch(error){toast(error.message);}break;}case'undo-record':{const c=current();if(canUndoRecord(state.undoRecord,c)){c.messages.pop();const undo=state.undoRecord;state.undoRecord=null;state.analysis=undo.analysis;state.selected=undo.selected;state.tone=undo.tone;state.replyDrafts=undo.drafts;state.mobileSheet=true;persist();render();toast('已撤销记录，编辑过的草稿也已恢复。');}break;}case'screenshot':if(window.xianwaiImportScreenshots){window.xianwaiImportScreenshots();}else if(window.webkit?.messageHandlers?.xianwai){toast('正在打开相册，图片将在本机识别。');window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});}else{modal('在 iPhone 上识别截图','网页原型暂不识别图片。iPhone 源码版内置 Apple Vision 本机文字识别。',`<div class="notice">在 iPhone App 的“导入聊天 → 截图识别”中，从相册选择截图。识别后的文字先进入核对界面，不会自动上传。网页可以粘贴已有文字，或导入 TXT / JSON。</div>`,`<button class="primary-btn" data-action="import">返回文字导入</button>`);}break;case'save-settings':{const endpoint=$('#endpoint').value.trim().replace(/\/$/,'');if(endpoint){try{const u=new URL(endpoint);if(u.username||u.password||u.search||u.hash||u.pathname!=='/'||(u.protocol!=='https:'&&!(u.protocol==='http:'&&['127.0.0.1','localhost'].includes(u.hostname))))throw new Error();}catch{modalError('请输入不带路径和参数的 HTTPS 后端地址，本机可用 http://localhost:4388。');break;}}const owner=$('#modal-root .modal'),candidate={endpoint,token:$('#token').value.trim(),persist:$('#persist').checked,live:$('#live').checked};b.disabled=true;const settingsTask=new AbortController(),abortSettings=()=>settingsTask.abort();document.addEventListener('xianwai-modal-closing',abortSettings,{once:true});try{await window.xianwaiBeforeSettings?.(candidate,settingsTask.signal);if(!owner.isConnected)break;invalidate();Object.assign(state,candidate);window.xianwaiSettingsSaved?.();persist();}catch(error){if(owner.isConnected){modalError(error.message);b.disabled=false;}break;}finally{document.removeEventListener('xianwai-modal-closing',abortSettings);}closeModal();if(state.selected!==null)analyze(state.selected,false);else render();toast(state.live?'已开启在线 AI，聊天将发送至你配置的服务。':'已切换为本地规则试用');break;}case'save-profile':{invalidate();const c=adoptCurrent();c.title=$('#chat-title').value.trim()||'新的对话';c.name=$('#partner-name').value.trim()||'对方';c.note=$('#context-note').value.trim();c.style=$('#reply-style').value.trim();c.preferredTone=$('#preferred-tone').value;state.tone=c.preferredTone;persist();closeModal();state.analysis=null;state.selected=null;render();toast('已保存，下一次起草会参考你的习惯。');break;}case'copy-edited':copyText($('#edit-reply').value);break;case'retry':if(state.selected!==null)analyze(state.selected);break;case'export':{const c=current(),data=JSON.stringify(c.messages,null,2);if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'export',text:data});break;}const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='弦外-聊天.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('已导出聊天 JSON');break;}case'clear':modal('清除聊天与收藏','这会删除当前工作台的聊天和收藏、已连接 Mac 的备份，并关闭保存。请先导出需要保留的聊天。',`<div class="notice">无法撤销此操作。如已配对，Mac 备份删除成功后才会清除本机内容。</div>`,`<button class="outline-btn" data-action="settings">返回设置</button><button class="primary-btn" data-action="confirm-clear">确认清除</button>`);break;case'confirm-clear':{if(clearing)break;const owner=$('#modal-root .modal');clearing=true;owner.querySelectorAll('button').forEach(button=>button.disabled=true);invalidate();try{await window.xianwaiDeleteBackup?.();clearing=false;localRecovery=null;const chat={...freshChat,id:crypto.randomUUID(),messages:[]};state={...state,chats:[chat,...structuredClone(samples)],favorites:[],persist:false,active:chat.id,selected:null,analysis:null,loading:false,page:'chat',mobileSheet:false};persist();closeModal();render();toast('已清除聊天与收藏，并关闭保存。');}catch(error){clearing=false;modalError(error.message);owner.querySelectorAll('button').forEach(button=>button.disabled=false);}break;}case'download-recovery':{const url=URL.createObjectURL(new Blob([localRecovery||''],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='弦外-原始记录备份.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);break;}}});
 document.addEventListener('submit',async e=>{
  if(e.target.id!=='composer')return;e.preventDefault();const f=e.target,text=f.elements.message.value.trim(),role=f.elements.role.value;if(!text){toast('先粘贴对方的一句话。');return;}
  if(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')){openImport(text);return;}
- try{const c=current(),result=addQuickMessage(samples.some(x=>x.id===c.id)?[]:c.messages,text,role);adoptCurrent();generation++;state.loading=false;c.messages=result.messages;state.analysis=null;state.selected=null;state.replyDrafts={};persist();if(role==='partner')await analyze(c.messages.length-1);else{render();toast(result.reused?'这句已经在前文中。':'已把你的回复加入前文。');}}catch(error){toast(error.message);}
+ try{const c=current(),result=addQuickMessage(samples.some(x=>x.id===c.id)?[]:c.messages,text,role);adoptCurrent();invalidate();c.messages=result.messages;state.analysis=null;state.selected=null;state.replyDrafts={};persist();if(role==='partner')await analyze(c.messages.length-1);else{render();toast(result.reused?'这句已经在前文中。':'已把你的回复加入前文。');}}catch(error){toast(error.message);}
 });
-document.addEventListener('change',async e=>{if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{$('#transcript').value=await f.text();toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
+document.addEventListener('change',async e=>{if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{const input=$('#transcript'),chatId=state.active,text=await f.text();if(!input?.isConnected||state.active!==chatId)return;input.value=text;toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');$('#sidebar')?.classList.remove('open');}if(e.key==='Tab'&&$('#modal-root .modal')){const items=[...$('#modal-root').querySelectorAll('button,input,textarea,select')].filter(x=>!x.hidden&&!x.disabled);if(e.shiftKey&&document.activeElement===items[0]){e.preventDefault();items.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===items.at(-1)){e.preventDefault();items[0]?.focus();}}});
 function bindLongPress(){document.querySelectorAll('[data-message]').forEach(b=>{let timer,x,y,fired=false;b.addEventListener('pointerdown',e=>{if(e.button!==0)return;fired=false;x=e.clientX;y=e.clientY;timer=setTimeout(()=>{fired=true;navigator.vibrate?.(15);analyze(Number(b.dataset.message));},450);});b.addEventListener('pointermove',e=>{if(Math.abs(e.clientX-x)>8||Math.abs(e.clientY-y)>8)clearTimeout(timer);});for(const event of ['pointerup','pointercancel','pointerleave'])b.addEventListener(event,()=>clearTimeout(timer));b.addEventListener('click',e=>{if(fired){e.preventDefault();e.stopPropagation();} });b.addEventListener('contextmenu',e=>{e.preventDefault();clearTimeout(timer);analyze(Number(b.dataset.message));});});}
 window.xianwaiReceiveOCR=(rows)=>{try{reviewRows=validateMessages(rows).map(r=>({...r,uncertain:true}));showReview();toast('识别完成，请核对发送者、文字和顺序。');}catch(err){toast(err.message);}};
 window.xianwaiError=message=>toast(message);
 state.analysis=state.selected!==null?localAnalysis(current().messages,state.selected,state.tone):null;render();
 
-startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){input.value=text;input.focus();}else openImport(text);},stopAnalysis:()=>{generation++;state.loading=false;state.analysis=null;state.analysisError='已取消这次分析，可以重新选择消息。';renderAnalysis();}});
+startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){input.value=text;input.focus();}else openImport(text);},stopAnalysis:()=>{invalidate();render();}});
 
 document.addEventListener('input',e=>{if(e.target.id==='reply-draft')state.replyDrafts[state.tone]=e.target.value;if(e.target.closest('.review-row'))updateReviewSummary();});
 

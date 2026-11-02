@@ -32,3 +32,11 @@ test('all tone variants can be selected from a single analysis result',()=>{
  assert.equal(replyForTone(analysis,'brief').text,'我在听。');
  assert.equal(replyForTone(analysis,'warm').text,'我在，慢慢说。');
 });
+
+test('undo cannot remove a replacement transcript with the same message count',async()=>{
+ const {canUndoRecord}=await import('../dist/flow.js');
+ const chat={id:'test',messages:[a,b]},record={chatId:'test',snapshot:JSON.stringify([a,b])};
+ assert.equal(canUndoRecord(record,chat),true);
+ assert.equal(canUndoRecord(record,{...chat,messages:[a,c]}),false);
+ assert.equal(canUndoRecord(record,{...chat,id:'another'}),false);
+});
