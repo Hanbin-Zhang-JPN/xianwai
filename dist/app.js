@@ -152,7 +152,7 @@ window.xianwaiError=message=>toast(message);
 const libraryUI=createLibraryUI({getState:()=>state,current,modal,closeModal,persist,render,toast,selectChat,openRecord,icon,escape:esc,invalidate});
 restoreProgress();render();
 
-startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}else openImport(text);},stopAnalysis:()=>{invalidate();render();}});
+startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){if(text!==undefined){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));}input.focus();}else if(text!==undefined)openImport(text);},stopAnalysis:()=>{invalidate();render();}});
 
 document.addEventListener('input',event=>{
  if(event.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:$('#composer select').value};setContactComposer(current(),state.composerDrafts[state.active]);saveProgress();}

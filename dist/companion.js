@@ -3,6 +3,7 @@ import {createWorkspaceSync,withRequestTimeout} from './workspace-sync.js';
 import {mergeWorkspaces} from './workspace.js';
 import {validateMessages} from './core.js';
 import {safeStorage,parsePairLink,probeConnection,connectionError} from './pairing.js';
+import {pasteClipboard} from './clipboard.js';
 
 export const requestAnalysis=async options=>{try{return await analysisClient.request(options);}catch(error){if(error.status===401)error.message=connectionError(error);if(error.status===401||error instanceof TypeError||error.name==='TimeoutError')document.dispatchEvent(new CustomEvent('xianwai-connection-error',{detail:connectionError(error)}));throw error;}};
 export const cancelAnalysis=()=>analysisClient.cancel();
@@ -11,10 +12,10 @@ export function startCompanion(api){
  const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
  let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='',heartbeat=null;
  let contextVersion=0;
- const sync=createWorkspaceSync({onError:error=>{syncError=error.message;draw();toast(error.message+' 当前设备的记录仍保留。');}});
+ const sync=createWorkspaceSync({onError:error=>{syncError=connectionError(error);draw();toast(syncError);}});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
- const localWorkspace=()=>{const s=getState();return {schemaVersion:3,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
+ const localWorkspace=()=>{const s=getState();return {schemaVersion:4,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
  const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
  const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.composerDrafts=Object.fromEntries(workspace.chats.map(chat=>[chat.id,{...chat.composer}]));s.tone=s.chats.find(chat=>chat.id===s.active)?.preferredTone||'warm';}};
@@ -57,7 +58,7 @@ export function startCompanion(api){
    const status=await probeConnection(pair,{signal:task.controller.signal,onAttempt:(attempt,total)=>{const button=task.owner?.querySelector('[data-companion="connect"]');if(button)button.textContent=`正在验证 Mac（${attempt}/${total}）…`;}});
    if(!task.owner){clearTimeout(timeout);await waitForNoDialog(task.controller.signal);}
    let restored=null,revision=0;
-   if(options.save){if(status.workspaceSchema!==3)throw new Error('请先将 Mac 上的弦外升级到 0.4.1，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
+   if(options.save){if(status.workspaceSchema!==4)throw new Error('请先将 Mac 上的弦外升级到 0.4.2，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
    const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
    if(restored)applyWorkspace(restored.workspace);
@@ -101,7 +102,12 @@ export function startCompanion(api){
  const nativeReceive=window.xianwaiReceiveOCR;
  window.xianwaiReceiveOCR=(rows,id)=>{const task=nativeChat;if(!task||id!==task.id)return;nativeChat=null;if(getState().active===task.chatId&&contextVersion===task.version)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
  window.xianwaiOCRCancelled=id=>{if(nativeChat?.id===id)nativeChat=null;};
- async function paste(){try{const text=await navigator.clipboard.readText();if(text.length>2000||(/^(我|对方|她|他|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);}catch{api.quickPaste('');toast('在下方输入框长按粘贴，再点帮我回。');}}
+ async function paste(){
+  const s=getState(),chatId=s.active,version=contextVersion,chat=s.chats.find(chat=>chat.id===chatId),composer=JSON.stringify(chat?.composer);
+  await pasteClipboard({isCurrent:()=>getState().active===chatId&&contextVersion===version&&JSON.stringify(getState().chats.find(chat=>chat.id===chatId)?.composer)===composer,
+   accept:text=>{if(text.length>2000||(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);},
+   unavailable:()=>{api.quickPaste();toast('在下方输入框长按粘贴，原有输入已保留。');},empty:()=>toast('剪贴板没有文字，原有输入已保留。')});
+ }
  document.addEventListener('xianwai-modal-closing',()=>{if(pairTask?.owner)cancelPair();if(ocrTask)cancelOCR();});
  document.addEventListener('xianwai-context-changing',()=>{contextVersion++;cancelOCR();});
  document.addEventListener('xianwai-connection-error',event=>{phase='offline';draw();toast(event.detail);});
@@ -117,14 +123,14 @@ export function startCompanion(api){
    case'disconnect':disconnect();closeModal();render();toast('已断开 Mac 连接，聊天与收藏仍在当前设备。');break;
   }}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}
  });
- window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:3,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
+ window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:4,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
  window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;remembered=!!(safeStorage.read('localStorage','xianwai-connection-v1')||safeStorage.read('sessionStorage','xianwai-connection-v1'));if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
  window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;permanent=!!safeStorage.read('localStorage','xianwai-connection-v1');rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
  window.xianwaiBeforeSettings=async(candidate,signal)=>{
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
   if(!candidate.persist){sync.disconnect();return;}
-  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==3)throw new Error('请先将 Mac 弦外升级到 0.4.1，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==4)throw new Error('请先将 Mac 弦外升级到 0.4.2，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));

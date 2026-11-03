@@ -11,7 +11,7 @@ import {addContactMessage,contextWindow,saveAnalysisRecord,recordContext,replace
 const library=()=>normalizeWorkspace({active:'person',chats:[{id:'person',name:'小满',title:'和小满的聊天',messages:[{role:'partner',text:'今天有点累'}]}],favorites:[]});
 const analyze=(chat,now=1000,id='analysis-one')=>{const context=contextWindow(chat.messages,chat.messages.length-1);return saveAnalysisRecord(chat,context,localAnalysis(context.messages,context.targetIndex),{now,newId:()=>id});};
 test('legacy workspaces migrate deterministically without changing speakers, text, or recording invented times',()=>{
- const first=library(),second=library();assert.equal(first.schemaVersion,3);assert.deepEqual(first,second);assert.equal(first.chats[0].messages[0].createdAt,0);assert.deepEqual(first.folders,[]);assert.deepEqual(first.chats[0].analyses,[]);
+ const first=library(),second=library();assert.equal(first.schemaVersion,4);assert.deepEqual(first,second);assert.equal(first.chats[0].messages[0].createdAt,0);assert.deepEqual(first.folders,[]);assert.deepEqual(first.chats[0].analyses,[]);
 });
 test('next-day continuation keeps previous context and analysis drafts through serialized restore',()=>{
  const original=library(),chat=original.chats[0],record=analyze(chat);

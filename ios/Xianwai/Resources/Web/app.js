@@ -5,9 +5,10 @@ function parseTranscript(raw) {
  if (!text) throw new Error('先粘贴一段聊天，再开始整理。');
  if (text.length > LIMITS.total) throw new Error('这段聊天超过 80,000 字，请分段导入。');
  if (text.startsWith('{')) {
-  let value;try{value=JSON.parse(text);}catch{}
+  let value;try{value=JSON.parse(text);}catch{throw new Error('JSON 格式不正确，请检查括号和引号。');}
   if(value&&['xianwai-library','xianwai-contact'].includes(value.format))throw new Error('这是联系人资料库导出文件，包含历史分析，不能作为聊天文本导入。请保留完整原文件；普通聊天 JSON 应使用消息数组。');
   if(value&&Array.isArray(value.messages))return validateMessages(value.messages);
+  throw new Error('聊天 JSON 应为消息数组，或包含 messages 数组；若这是对方的原话，请在前面加“对方：”。');
  }
  if (text.startsWith('[')) {
   let rows;
@@ -213,7 +214,7 @@ function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=70
 const analysisClient=createAnalysisClient();
 
 
-const LIBRARY_LIMITS={folders:20,folderEntries:100,records:100,messages:1500,pool:3000,total:500000,bytes:8000000};
+const LIBRARY_LIMITS={folders:20,folderEntries:100,records:100,messages:1500,pool:3000,removedMessages:10000,total:500000,bytes:8000000};
 const isSampleChat=chat=>['late','tired','weekend'].includes(chat.id);
 const libraryText=(value,max,fallback='')=>{if(value===undefined)return fallback;if(typeof value!=='string'||value.length>max)throw new Error('联系人资料格式不正确。');return value;};
 const libraryTime=value=>{if(value===undefined)return 0;if(!Number.isSafeInteger(value)||value<0)throw new Error('记录时间格式不正确。');return value;};
@@ -248,6 +249,8 @@ function renameLibraryFolder(folders,id,name,now=Date.now()){
 }
 function normalizeContactMemory(chat){
  const messages=normalizeContactMessages(chat.messages),archive=normalizeContactMessages(chat.archive||[],{archive:true}),pool=new Map(messages.map(message=>[message.id,message]));
+ const removedMessageIds=normalizeRemovedMessages(chat.removedMessageIds);
+ if(messages.some(message=>removedMessageIds.includes(message.id)))throw new Error('当前前文包含已移除的消息，已停止覆盖。');
  for(const message of archive){const prior=pool.get(message.id);if(prior&&(prior.role!==message.role||prior.text!==message.text))throw new Error('历史消息与当前消息的编号冲突。');pool.set(message.id,message);}
  if(pool.size>LIBRARY_LIMITS.pool||[...pool.values()].reduce((sum,message)=>sum+message.text.length,0)>LIBRARY_LIMITS.total)throw new Error('联系人历史原文容量已满，请导出后整理分析记录。');
  const deletedAnalysisIds=chat.deletedAnalysisIds||[];if(!Array.isArray(deletedAnalysisIds)||deletedAnalysisIds.length>1000)throw new Error('分析删除记录格式不正确。');const deleted=[...new Set(deletedAnalysisIds.map(libraryId))];
@@ -261,7 +264,17 @@ function normalizeContactMemory(chat){
   const drafts={};for(const tone of ['warm','honest','brief'])if(record.drafts?.[tone]!==undefined)drafts[tone]=libraryText(record.drafts[tone],2000);
   return {id,createdAt:libraryTime(record.createdAt),updatedAt:libraryTime(record.updatedAt??record.createdAt),targetId,contextIds,result,tone:['warm','honest','brief'].includes(record.tone)?record.tone:'warm',drafts,note:libraryText(record.note,2000),style:libraryText(record.style,1000)};
  }).sort((a,b)=>b.createdAt-a.createdAt||a.id.localeCompare(b.id));
- return {conflictOf:chat.conflictOf==null?null:libraryId(chat.conflictOf),messages,archive:archive.filter(message=>!messages.some(current=>current.id===message.id)),analyses,deletedAnalysisIds:deleted,resumeId:ids.has(chat.resumeId)?chat.resumeId:null,resumeUpdatedAt:libraryTime(chat.resumeUpdatedAt),updatedAt:libraryTime(chat.updatedAt),profileUpdatedAt:libraryTime(chat.profileUpdatedAt),preferredToneUpdatedAt:libraryTime(chat.preferredToneUpdatedAt),composerUpdatedAt:libraryTime(chat.composerUpdatedAt??chat.updatedAt),folderId:chat.folderId==null?null:libraryId(chat.folderId),folderUpdatedAt:libraryTime(chat.folderUpdatedAt),composer:{text:libraryText(chat.composer?.text,2000),role:chat.composer?.role==='me'?'me':'partner'}};
+ return {conflictOf:chat.conflictOf==null?null:libraryId(chat.conflictOf),messages,removedMessageIds,archive:archive.filter(message=>!messages.some(current=>current.id===message.id)),analyses,deletedAnalysisIds:deleted,resumeId:ids.has(chat.resumeId)?chat.resumeId:null,resumeUpdatedAt:libraryTime(chat.resumeUpdatedAt),updatedAt:libraryTime(chat.updatedAt),profileUpdatedAt:libraryTime(chat.profileUpdatedAt),preferredToneUpdatedAt:libraryTime(chat.preferredToneUpdatedAt),composerUpdatedAt:libraryTime(chat.composerUpdatedAt??chat.updatedAt),folderId:chat.folderId==null?null:libraryId(chat.folderId),folderUpdatedAt:libraryTime(chat.folderUpdatedAt),composer:{text:libraryText(chat.composer?.text,2000),role:chat.composer?.role==='me'?'me':'partner'}};
+}
+function normalizeRemovedMessages(value=[]){
+ if(!Array.isArray(value))throw new Error('消息整理记录格式不正确。');
+ const ids=[...new Set(value.map(libraryId))];
+ if(ids.length>LIBRARY_LIMITS.removedMessages)throw new Error('消息整理记录已满，请导出资料库后新建联系人继续。');
+ return ids;
+}
+function currentMessageCandidates(remote,local){
+ const removedMessageIds=normalizeRemovedMessages([...(remote.removedMessageIds||[]),...(local.removedMessageIds||[])]),removed=new Set(removedMessageIds);
+ return {remote:remote.messages.filter(message=>!removed.has(message.id)),local:local.messages.filter(message=>!removed.has(message.id)),removedMessageIds};
 }
 function touchContact(chat,now=Date.now()){chat.updatedAt=Math.max(now,(chat.updatedAt||0)+1);return chat;}
 function contextWindow(messages,index){
@@ -271,7 +284,7 @@ function contextWindow(messages,index){
  start++;return {start,messages:messages.slice(start,index+1),targetIndex:index-start};
 }
 function addContactMessage(messages,text,role='partner',{now=Date.now(),newId=()=>crypto.randomUUID()}={}){
- const value=String(text).trim(),last=messages.at(-1);if(last?.role===role&&last.text===value&&last.createdAt&&new Date(last.createdAt).toDateString()===new Date(now).toDateString())return {messages:normalizeContactMessages(messages),reused:true};
+ const value=String(text).trim(),last=messages.at(-1),elapsed=last?now-last.createdAt:Infinity;if(last?.role===role&&last.text===value&&last.createdAt&&elapsed>=0&&elapsed<=30000&&new Date(last.createdAt).toDateString()===new Date(now).toDateString())return {messages:normalizeContactMessages(messages),reused:true};
  return {messages:normalizeContactMessages([...messages,{id:newId(),createdAt:now,role,text:value}]),reused:false};
 }
 function prepareContactImport(existing,rows,{append=true,removeOverlap=true,now=Date.now(),newId=()=>crypto.randomUUID()}={}){
@@ -283,7 +296,8 @@ function prepareContactImport(existing,rows,{append=true,removeOverlap=true,now=
 function replaceContactMessages(chat,messages,now=Date.now()){
  const next=normalizeContactMessages(messages),pool=contactMessagePool(chat,{messages:next}),needed=new Set((chat.analyses||[]).flatMap(record=>record.contextIds)),currentIds=new Set(next.map(message=>message.id));
  const archive=[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id));
- const memory=normalizeContactMemory({...chat,messages:next,archive,resumeId:null,resumeUpdatedAt:now,updatedAt:Math.max(now,(chat.updatedAt||0)+1)});
+ const removedMessageIds=normalizeRemovedMessages([...(chat.removedMessageIds||[]),...chat.messages.filter(message=>!currentIds.has(message.id)).map(message=>message.id)]);
+ const memory=normalizeContactMemory({...chat,messages:next,removedMessageIds,archive,resumeId:null,resumeUpdatedAt:now,updatedAt:Math.max(now,(chat.updatedAt||0)+1)});
  Object.assign(chat,memory);return chat;
 }
 function undoSentMessage(chat,expectedSnapshot,now=Date.now()){
@@ -334,11 +348,13 @@ function deleteAnalysisRecord(chat,id,now=Date.now()){
 }
 function moveContact(chat,folderId,now=Date.now()){const id=folderId?libraryId(folderId):null;if(chat.folderId===id)return;chat.folderId=id;chat.folderUpdatedAt=Math.max(now,(chat.folderUpdatedAt||0)+1);touchContact(chat,now);}
 function mergeContactMemory(remote,local,messages){
+ const {removedMessageIds}=currentMessageCandidates(remote,local);
+ const removed=new Set(removedMessageIds);messages=messages.filter(message=>!removed.has(message.id));
  const deletedAnalysisIds=[...new Set([...(remote.deletedAnalysisIds||[]),...(local.deletedAnalysisIds||[])])],records=new Map();
  const identity=record=>libraryCanonical([record.createdAt,record.targetId,record.contextIds,record.result,record.note,record.style]);
  for(const record of [...remote.analyses,...local.analyses])if(!deletedAnalysisIds.includes(record.id)){const prior=records.get(record.id);if(prior&&identity(prior)!==identity(record))throw new Error('同一分析编号对应不同原文或结果，已停止合并。请先导出两边的资料库。');if(!prior||record.updatedAt>prior.updatedAt)records.set(record.id,record);}
  const pool=contactMessagePool(remote,local),needed=new Set([...records.values()].flatMap(record=>record.contextIds)),currentIds=new Set(messages.map(message=>message.id)),folder=(local.folderUpdatedAt>=remote.folderUpdatedAt?local:remote),resume=(local.resumeUpdatedAt>=remote.resumeUpdatedAt?local:remote),composer=(local.composerUpdatedAt>=remote.composerUpdatedAt?local:remote),tone=(local.preferredToneUpdatedAt>=remote.preferredToneUpdatedAt?local:remote),profile=(local.profileUpdatedAt>remote.profileUpdatedAt?local:remote);
- return {...remote,title:profile.title,name:profile.name,note:profile.note,style:profile.style,profileUpdatedAt:profile.profileUpdatedAt,preferredTone:tone.preferredTone,preferredToneUpdatedAt:tone.preferredToneUpdatedAt,messages,archive:[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id)),analyses:[...records.values()],deletedAnalysisIds,resumeId:resume.resumeId,resumeUpdatedAt:resume.resumeUpdatedAt,updatedAt:Math.max(local.updatedAt,remote.updatedAt),folderId:folder.folderId,folderUpdatedAt:folder.folderUpdatedAt,composer:composer.composer,composerUpdatedAt:composer.composerUpdatedAt};
+ return {...remote,title:profile.title,name:profile.name,note:profile.note,style:profile.style,profileUpdatedAt:profile.profileUpdatedAt,preferredTone:tone.preferredTone,preferredToneUpdatedAt:tone.preferredToneUpdatedAt,messages,removedMessageIds,archive:[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id)),analyses:[...records.values()],deletedAnalysisIds,resumeId:resume.resumeId,resumeUpdatedAt:resume.resumeUpdatedAt,updatedAt:Math.max(local.updatedAt,remote.updatedAt),folderId:folder.folderId,folderUpdatedAt:folder.folderUpdatedAt,composer:composer.composer,composerUpdatedAt:composer.composerUpdatedAt};
 }
 
 
@@ -348,7 +364,7 @@ const bounded=(value,max,name,fallback)=>{
  return value;
 };
 function normalizeWorkspace(value){
- if(value?.schemaVersion!==undefined&&![1,2,3].includes(value.schemaVersion))throw new Error('资料库版本较新或格式不正确，请更新应用，已停止覆盖。');
+ if(value?.schemaVersion!==undefined&&![1,2,3,4].includes(value.schemaVersion))throw new Error('资料库版本较新或格式不正确，请更新应用，已停止覆盖。');
  if(!value||!Array.isArray(value.chats)||value.chats.length>15||!Array.isArray(value.favorites)||value.favorites.length>300)throw new Error('聊天备份格式或数量不正确，已停止覆盖。');
  const folders=normalizeFolders(value.folders),activeFolders=new Set(folders.filter(folder=>!folder.deleted).map(folder=>folder.id));
  const deletedFavoriteIds=value.deletedFavoriteIds||[];if(!Array.isArray(deletedFavoriteIds)||deletedFavoriteIds.length>1000||deletedFavoriteIds.some(id=>typeof id!=='string'||!id||id.length>100))throw new Error('收藏删除记录格式或数量不正确。');
@@ -366,7 +382,7 @@ function normalizeWorkspace(value){
   return {id,text:bounded(item.text,2000,'收藏文字'),label:bounded(item.label,100,'收藏语气',''),name:bounded(item.name,100,'收藏称呼',''),source:bounded(item.source,100,'收藏来源','')};
  });
  const activeUpdatedAt=value.activeUpdatedAt??0;if(!Number.isSafeInteger(activeUpdatedAt)||activeUpdatedAt<0)throw new Error('联系人进度时间不正确。');
- const workspace={schemaVersion:3,active:ids.has(value.active)?value.active:chats[0]?.id||null,activeUpdatedAt,chats,favorites,folders,deletedFavoriteIds:deletedFavorites};
+ const workspace={schemaVersion:4,active:ids.has(value.active)?value.active:chats[0]?.id||null,activeUpdatedAt,chats,favorites,folders,deletedFavoriteIds:deletedFavorites};
  if(new TextEncoder().encode(JSON.stringify(workspace)).length>LIBRARY_LIMITS.bytes)throw new Error('资料库已超过 8 MB，请先导出并整理分析记录，原数据未被覆盖。');return workspace;
 }
 
@@ -386,10 +402,12 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
   const sameProfile=['title','name','note','style','subtitle'].every(key=>prior[key]===chat[key]);
   const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text);
   const knownProfileEdit=prior.profileUpdatedAt!==chat.profileUpdatedAt&&(prior.profileUpdatedAt>0||chat.profileUpdatedAt>0);
-  if((sameProfile||knownProfileEdit)&&(prefix(prior.messages,chat.messages)||prefix(chat.messages,prior.messages))){
-   chats.set(chat.id,mergeContactMemory(prior,chat,prior.messages.length>=chat.messages.length?prior.messages:chat.messages));continue;
+  const candidates=currentMessageCandidates(prior,chat);
+  if((sameProfile||knownProfileEdit)&&(prefix(candidates.remote,candidates.local)||prefix(candidates.local,candidates.remote))){
+   chats.set(chat.id,mergeContactMemory(prior,chat,candidates.remote.length>=candidates.local.length?candidates.remote:candidates.local));continue;
   }
-  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||copy.title.endsWith('（本机副本）'))&&copy.title.replace(/（本机副本）$/,'')===chat.title.replace(/（本机副本）$/,'')&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text})=>({role,text})))===JSON.stringify(chat.messages.map(({role,text})=>({role,text}))));
+  const copyTitle=chat.title.slice(0,24)+'（本机副本）';
+  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||(!copy.conflictOf&&copy.title===copyTitle))&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text})=>({role,text})))===JSON.stringify(chat.messages.map(({role,text})=>({role,text}))));
   if(priorCopy){chats.set(priorCopy.id,{...mergeContactMemory(priorCopy,chat,priorCopy.messages),id:priorCopy.id,title:priorCopy.title});if(active===chat.id)active=priorCopy.id;continue;}
 
   const copy={...chat,id:newId(),conflictOf:chat.id,title:chat.title.slice(0,24)+'（本机副本）'};if(chats.has(copy.id))throw new Error('生成对话编号失败，请重试。');chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
@@ -399,9 +417,10 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
   if(!prior)favorites.set(item.id,item);
   else if(JSON.stringify(prior)!==JSON.stringify(item)){const copy={...item,id:newId(),label:item.label.slice(0,94)+'（本机副本）'};favorites.set(copy.id,copy);copies++;}
  }
+ for(const id of deletedFavoriteIds)favorites.delete(id);
  if(chats.size>15||favorites.size>300)throw new Error('两边的记录超过容量，已停止自动合并。可取消“保留聊天”后连接，先导出需要的内容。');
  if(mac.activeUpdatedAt>device.activeUpdatedAt)active=mac.active;
- return {workspace:normalizeWorkspace({schemaVersion:3,folders:[...folders.values()],deletedFavoriteIds,activeUpdatedAt:Math.max(mac.activeUpdatedAt,device.activeUpdatedAt),active:active||mac.active,chats:[...chats.values()],favorites:[...favorites.values()]}),conflictCopies:copies};
+ return {workspace:normalizeWorkspace({schemaVersion:4,folders:[...folders.values()],deletedFavoriteIds,activeUpdatedAt:Math.max(mac.activeUpdatedAt,device.activeUpdatedAt),active:active||mac.active,chats:[...chats.values()],favorites:[...favorites.values()]}),conflictCopies:copies};
 }
 
 
@@ -470,6 +489,7 @@ function parsePairLink(value){
 function connectionError(error){
  if(error?.status===401)return '二维码或配对链接已过期。请在 Mac 点击“重新连接”，再用 iPhone 相机重新扫码。';
  if(error?.name==='AbortError'||error?.name==='TimeoutError')return '连接超时。请确认 Mac 开机联网，用 Safari 重新打开；仍失败时在 Mac 重新连接后扫码。';
+ if(error instanceof TypeError)return '暂时连不上 Mac。请确认 Mac 开机联网，恢复连接后重试；当前设备的记录仍保留。';
  return error?.message||'暂时连不上 Mac，请稍后重试。';
 }
 function pausePairing(milliseconds,signal){return new Promise((resolve,reject)=>{
@@ -500,6 +520,15 @@ function readPersistencePreference(){
 }
 function writePersistencePreference(persist){return safeStorage.write('localStorage',preferencesKey,JSON.stringify({persist:persist===true}));}
 
+// A delayed clipboard permission response must not overwrite a different contact or newer input.
+async function pasteClipboard({read=()=>navigator.clipboard.readText(),isCurrent,accept,unavailable,empty}){
+ let text;
+ try{text=await read();}catch{if(isCurrent())unavailable();return false;}
+ if(!isCurrent())return false;
+ if(typeof text!=='string'||!text.trim()){empty();return false;}
+ accept(text);return true;
+}
+
 
 const requestAnalysis=async options=>{try{return await analysisClient.request(options);}catch(error){if(error.status===401)error.message=connectionError(error);if(error.status===401||error instanceof TypeError||error.name==='TimeoutError')document.dispatchEvent(new CustomEvent('xianwai-connection-error',{detail:connectionError(error)}));throw error;}};
 const cancelAnalysis=()=>analysisClient.cancel();
@@ -508,10 +537,10 @@ function startCompanion(api){
  const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
  let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='',heartbeat=null;
  let contextVersion=0;
- const sync=createWorkspaceSync({onError:error=>{syncError=error.message;draw();toast(error.message+' 当前设备的记录仍保留。');}});
+ const sync=createWorkspaceSync({onError:error=>{syncError=connectionError(error);draw();toast(syncError);}});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
- const localWorkspace=()=>{const s=getState();return {schemaVersion:3,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
+ const localWorkspace=()=>{const s=getState();return {schemaVersion:4,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
  const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
  const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.composerDrafts=Object.fromEntries(workspace.chats.map(chat=>[chat.id,{...chat.composer}]));s.tone=s.chats.find(chat=>chat.id===s.active)?.preferredTone||'warm';}};
@@ -554,7 +583,7 @@ function startCompanion(api){
    const status=await probeConnection(pair,{signal:task.controller.signal,onAttempt:(attempt,total)=>{const button=task.owner?.querySelector('[data-companion="connect"]');if(button)button.textContent=`正在验证 Mac（${attempt}/${total}）…`;}});
    if(!task.owner){clearTimeout(timeout);await waitForNoDialog(task.controller.signal);}
    let restored=null,revision=0;
-   if(options.save){if(status.workspaceSchema!==3)throw new Error('请先将 Mac 上的弦外升级到 0.4.1，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
+   if(options.save){if(status.workspaceSchema!==4)throw new Error('请先将 Mac 上的弦外升级到 0.4.2，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
    const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
    if(restored)applyWorkspace(restored.workspace);
@@ -598,7 +627,12 @@ function startCompanion(api){
  const nativeReceive=window.xianwaiReceiveOCR;
  window.xianwaiReceiveOCR=(rows,id)=>{const task=nativeChat;if(!task||id!==task.id)return;nativeChat=null;if(getState().active===task.chatId&&contextVersion===task.version)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
  window.xianwaiOCRCancelled=id=>{if(nativeChat?.id===id)nativeChat=null;};
- async function paste(){try{const text=await navigator.clipboard.readText();if(text.length>2000||(/^(我|对方|她|他|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);}catch{api.quickPaste('');toast('在下方输入框长按粘贴，再点帮我回。');}}
+ async function paste(){
+  const s=getState(),chatId=s.active,version=contextVersion,chat=s.chats.find(chat=>chat.id===chatId),composer=JSON.stringify(chat?.composer);
+  await pasteClipboard({isCurrent:()=>getState().active===chatId&&contextVersion===version&&JSON.stringify(getState().chats.find(chat=>chat.id===chatId)?.composer)===composer,
+   accept:text=>{if(text.length>2000||(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);},
+   unavailable:()=>{api.quickPaste();toast('在下方输入框长按粘贴，原有输入已保留。');},empty:()=>toast('剪贴板没有文字，原有输入已保留。')});
+ }
  document.addEventListener('xianwai-modal-closing',()=>{if(pairTask?.owner)cancelPair();if(ocrTask)cancelOCR();});
  document.addEventListener('xianwai-context-changing',()=>{contextVersion++;cancelOCR();});
  document.addEventListener('xianwai-connection-error',event=>{phase='offline';draw();toast(event.detail);});
@@ -614,14 +648,14 @@ function startCompanion(api){
    case'disconnect':disconnect();closeModal();render();toast('已断开 Mac 连接，聊天与收藏仍在当前设备。');break;
   }}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}
  });
- window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:3,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
+ window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:4,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
  window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;remembered=!!(safeStorage.read('localStorage','xianwai-connection-v1')||safeStorage.read('sessionStorage','xianwai-connection-v1'));if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
  window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;permanent=!!safeStorage.read('localStorage','xianwai-connection-v1');rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
  window.xianwaiBeforeSettings=async(candidate,signal)=>{
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
   if(!candidate.persist){sync.disconnect();return;}
-  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==3)throw new Error('请先将 Mac 弦外升级到 0.4.1，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==4)throw new Error('请先将 Mac 弦外升级到 0.4.2，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));
@@ -695,7 +729,7 @@ function createLibraryUI(api){
     case'new-folder':newFolder();break;
     case'create-contact':{const name=document.querySelector('#contact-name').value.trim();if(!name)throw new Error('请填写对方的称呼。');s.chats=s.chats.filter(chat=>!(chat.title==='我的聊天'&&chat.name==='对方'&&chat.subtitle==='常用对话'&&!chat.messages.length&&!chat.analyses.length&&!chat.note&&!chat.style&&!chat.composer.text));if(contacts().length>=15)throw new Error('最多保留 15 位联系人。');if(s.chats.length>=15)s.chats=s.chats.filter(chat=>!isSampleChat(chat));const now=Date.now(),chat={id:crypto.randomUUID(),name,title:document.querySelector('#contact-label').value.trim()||'和'+name+'的聊天',note:'',style:'',subtitle:'持续聊天',preferredTone:'warm',...normalizeContactMemory({messages:[],updatedAt:now,folderId:document.querySelector('#contact-folder').value||null,folderUpdatedAt:now})};s.chats.unshift(chat);closeModal();selectChat(chat.id);toast('联系人已创建。今天和明天，都可以从这里继续。');break;}
     case'create-folder':{const name=document.querySelector('#folder-name').value.trim();if(!name)throw new Error('请填写文件夹名称。');if(folders().some(folder=>folder.name===name))throw new Error('已有同名文件夹。');if(folders().length>=LIBRARY_LIMITS.folders)throw new Error('最多创建 20 个文件夹。');s.folders=createLibraryFolder(s.folders,name);s.folderFilter=s.folders.at(-1).id;s.page='contacts';persist();closeModal();render();break;}
-    case'export-all':download({format:'xianwai-library',version:1,exportedAt:Date.now(),workspace:{schemaVersion:3,active:s.active,activeUpdatedAt:s.activeUpdatedAt,chats:s.chats,favorites:s.favorites,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds}},'弦外-完整资料库.json');break;
+    case'export-all':download({format:'xianwai-library',version:1,exportedAt:Date.now(),workspace:{schemaVersion:4,active:s.active,activeUpdatedAt:s.activeUpdatedAt,chats:s.chats,favorites:s.favorites,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds}},'弦外-完整资料库.json');break;
     case'export-contact':exportContact();break;
     case'open-resume':if(current().resumeId)openRecord(s.active,current().resumeId);break;
    }
@@ -852,7 +886,7 @@ window.xianwaiError=message=>toast(message);
 const libraryUI=createLibraryUI({getState:()=>state,current,modal,closeModal,persist,render,toast,selectChat,openRecord,icon,escape:esc,invalidate});
 restoreProgress();render();
 
-startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}else openImport(text);},stopAnalysis:()=>{invalidate();render();}});
+startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){if(text!==undefined){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));}input.focus();}else if(text!==undefined)openImport(text);},stopAnalysis:()=>{invalidate();render();}});
 
 document.addEventListener('input',event=>{
  if(event.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:$('#composer select').value};setContactComposer(current(),state.composerDrafts[state.active]);saveProgress();}

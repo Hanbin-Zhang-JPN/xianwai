@@ -6,6 +6,14 @@
 
 Xianwai is a Chinese-language communication assistant for iPhone, powered by a paired Mac. It provides screenshot OCR, context-grounded analysis, and editable reply suggestions. Interpretations are hypotheses, not claims about another person's mind.
 
+## 0.4.2：离线重连与输入保护
+
+- 离线撤销或替换前文后，旧备份不会将移除的消息重新加回；历史分析仍保留当时的原话。
+- 剪贴板为空、无权限或读取失败时，保留未提交输入；切换联系人或编辑输入后，迟到的粘贴结果不会覆盖新内容。
+- 只合并 30 秒内的即时重复输入，同一天晚些时候再次发送相同短句会正常保留。
+- 修复长标题联系人反复生成冲突副本、收藏满额时替换一条导致重连失败，以及异常 JSON 被误当作对方消息。
+- 资料库格式升级为 4，兼容读取旧记录并阻止旧页面覆盖新格式。
+
 ## 0.4.1：保存与恢复修复
 
 - 撤销已分析的“已发出”消息时，保留该次分析的原文，不再破坏分析历史。
@@ -24,7 +32,7 @@ Xianwai is a Chinese-language communication assistant for iPhone, powered by a p
 
 每位联系人支持 1500 条当前消息、100 条分析记录；分析使用目标及之前最近 300 条、最多 8 万字，较早内容保留在联系人或分析原文中，不会自动当作已传给模型的记忆。当前资料库总上限 8 MB，达到容量会明确提示，不会静默删除旧记录。浏览器本机空间不足时可使用 Mac 备份并导出。
 
-Mac 与网页需一起升级到 0.4.1；升级后重新扫码，旧页面请刷新，以免旧格式覆盖新资料。
+Mac 与网页需一起升级到 0.4.2；升级后重新扫码，旧页面请刷新，以免旧格式覆盖新资料。
 
 ## 0.3.2：扫码连接与恢复
 

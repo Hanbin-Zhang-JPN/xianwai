@@ -246,7 +246,7 @@ struct XianwaiMacApp: App {
                     Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 29)).foregroundStyle(Color(red: 0.26, green: 0.37, blue: 0.27))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("弦外").font(.system(size: 29, weight: .medium, design: .serif))
-                    Text("0.4.1 · 粘贴一句就帮你回，关窗也能继续用。").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("0.4.2 · 粘贴一句就帮你回，关窗也能继续用。").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Circle().fill(bridge.aiReady ? Color.green.opacity(0.65) : Color.gray).frame(width: 7, height: 7)

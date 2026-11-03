@@ -15,6 +15,7 @@ export function parsePairLink(value){
 export function connectionError(error){
  if(error?.status===401)return '二维码或配对链接已过期。请在 Mac 点击“重新连接”，再用 iPhone 相机重新扫码。';
  if(error?.name==='AbortError'||error?.name==='TimeoutError')return '连接超时。请确认 Mac 开机联网，用 Safari 重新打开；仍失败时在 Mac 重新连接后扫码。';
+ if(error instanceof TypeError)return '暂时连不上 Mac。请确认 Mac 开机联网，恢复连接后重试；当前设备的记录仍保留。';
  return error?.message||'暂时连不上 Mac，请稍后重试。';
 }
 function pausePairing(milliseconds,signal){return new Promise((resolve,reject)=>{
