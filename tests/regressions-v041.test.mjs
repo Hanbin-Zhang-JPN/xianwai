@@ -67,7 +67,7 @@ test('library exports cannot be accidentally interpreted as chat messages',()=>{
  assert.throws(()=>parseTranscript(JSON.stringify({format:'xianwai-contact',contact:fixture().chats[0]})),/导出文件/);
  assert.deepEqual(parseTranscript(JSON.stringify({messages:[{role:'partner',text:'你好'}]})),[{role:'partner',text:'你好'}]);
 });
-test('a newer unsupported workspace schema is preserved by refusing to downgrade it',()=>{assert.throws(()=>normalizeWorkspace({...fixture(),schemaVersion:5}),/版本较新/);});
+test('a newer unsupported workspace schema is preserved by refusing to downgrade it',()=>{assert.throws(()=>normalizeWorkspace({...fixture(),schemaVersion:6}),/版本较新/);});
 
 test('replacing a current message cannot change saved evidence under the same message identifier',()=>{
  const workspace=fixture(),chat=workspace.chats[0];analyze(chat);const before=JSON.stringify(chat);

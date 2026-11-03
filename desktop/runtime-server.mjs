@@ -9,6 +9,7 @@ import {randomUUID,timingSafeEqual} from 'node:crypto';
 import {analyzeWithCodex,defaultCodex} from '../lib/codex.mjs';
 import {contextFor} from '../dist/core.js';
 import {WorkspaceStore} from '../lib/workspace-store.mjs';
+import {normalizeReplyOptions} from '../dist/reply-options.js';
 
 const exec=promisify(execFile), root=fileURLToPath(new URL('../dist/',import.meta.url));
 const token=process.env.XIANWAI_TOKEN;
@@ -36,7 +37,7 @@ const server=http.createServer(async(req,res)=>{
   if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.4.2',workspaceSchema:4,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.5.0',workspaceSchema:5,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
     if(req.method==='DELETE'){const input=await body(req);const value=await workspaceStore.clear(input?.baseRevision);send(res,200,{deleted:true,revision:value.revision});return;}
@@ -46,6 +47,7 @@ const server=http.createServer(async(req,res)=>{
     await refreshAuth();if(!ready){send(res,503,{error:'请先在这台 Mac 的 ChatGPT 应用中登录 Codex。'});return;}
     const input=await body(req);if(!input||typeof input!=='object')throw new Error('分析请求格式不正确。');contextFor(input.messages,input.targetIndex);
     if(!['warm','honest','brief'].includes(input.tone)||typeof input.note!=='string'||input.note.length>2000||(input.style!==undefined&&(typeof input.style!=='string'||input.style.length>1000)))throw new Error('语气或背景格式不正确。');
+    normalizeReplyOptions(input.replyOptions);
     for(const [id,job] of jobs)if(Date.now()-job.created>600000)jobs.delete(id);
     const id=input.requestId||randomUUID();
     if(typeof id!=='string'||!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');

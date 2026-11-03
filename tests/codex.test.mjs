@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {analyzeWithCodex} from '../lib/codex.mjs';
 const input={messages:[{role:'partner',text:'今天有点累'}],targetIndex:0,tone:'warm',note:''};
-const model={title:'先倾听',feeling:'可能疲惫',need:'倾听',question:'愿意说说吗？',avoid:'不要催促',hypotheses:[{text:'可能想倾诉',evidence:[1]},{text:'也可能想休息',evidence:[1]}],replies:Array.from({length:3},()=>({label:'自然接话',text:'我在听，你慢慢说。',reason:'先倾听'}))};
+const model={recommendation:{action:'reply',tone:'brief',reason:'先回应具体原话，再根据实际情况补充。',check:''},title:'先倾听',feeling:'可能疲惫',need:'倾听',question:'愿意说说吗？',avoid:'不要催促',hypotheses:[{text:'可能想倾诉',evidence:[1]},{text:'也可能想休息',evidence:[1]}],replies:Array.from({length:3},()=>({label:'自然接话',text:'我在听，你慢慢说。',reason:'先倾听'}))};
 async function fake(t,source){const folder=await mkdtemp(path.join(os.tmpdir(),'xianwai-codex-test-'));t.after(()=>rm(folder,{recursive:true,force:true}));const executable=path.join(folder,'fake-codex.mjs');await writeFile(executable,'#!'+process.execPath+'\n'+source,{mode:0o700});const previous=process.env.CODEX_BIN;process.env.CODEX_BIN=executable;t.after(()=>{if(previous===undefined)delete process.env.CODEX_BIN;else process.env.CODEX_BIN=previous;});return folder;}
 test('Codex output handles split Chinese bytes and a final event without newline',async t=>{
  const text=JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(model)}})+'\n'+JSON.stringify({type:'turn.completed'});

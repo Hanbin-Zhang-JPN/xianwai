@@ -1,4 +1,5 @@
 import {contextFor} from './core.js';
+import {normalizeRecommendation} from './reply-options.js';
 const aborted=()=>new DOMException('已取消分析','AbortError');
 export function validateClientAnalysis(value,input){
  const context=contextFor(input.messages,input.targetIndex),count=context.length;
@@ -6,6 +7,7 @@ export function validateClientAnalysis(value,input){
  const validEvidence=ids=>Array.isArray(ids)&&ids.length>0&&ids.length<=6&&ids.every(id=>Number.isInteger(id)&&id>=1&&id<=count);
  if(!value||value.mode!=='ai'||value.contextCount!==count||!['title','feeling','need','question','avoid'].every(key=>validText(value[key]))||!Array.isArray(value.replies)||value.replies.length!==3||!Array.isArray(value.facts)||!value.facts.length||!Array.isArray(value.hypotheses)||value.hypotheses.length<2||value.hypotheses.length>3)throw new Error('分析结果格式不正确，请重试。');
  if(value.replies.some((reply,index)=>!reply||reply.tone!==['warm','honest','brief'][index]||!['text','label','reason'].every(key=>validText(reply[key])))||[...value.facts,...value.hypotheses].some(item=>!item||!validText(item.text,2400)||!validEvidence(item.evidence)))throw new Error('分析结果中的回复或原话引用不正确，请重试。');
+ normalizeRecommendation(value.recommendation);
  return value;
 }
 

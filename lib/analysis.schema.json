@@ -1,9 +1,109 @@
 {
- "type":"object","additionalProperties":false,
- "properties":{
-  "title":{"type":"string"},"feeling":{"type":"string"},"need":{"type":"string"},
-  "question":{"type":"string"},"avoid":{"type":"string"},
-  "hypotheses":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string"},"evidence":{"type":"array","items":{"type":"integer"}}},"required":["text","evidence"]}},
-  "replies":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"label":{"type":"string"},"text":{"type":"string"},"reason":{"type":"string"}},"required":["label","text","reason"]}}
- },"required":["title","feeling","need","question","avoid","hypotheses","replies"]
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "feeling": {
+      "type": "string"
+    },
+    "need": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string"
+    },
+    "avoid": {
+      "type": "string"
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [
+          "text",
+          "evidence"
+        ]
+      }
+    },
+    "replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "text",
+          "reason"
+        ]
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tone": {
+          "type": "string",
+          "enum": [
+            "warm",
+            "honest",
+            "brief"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "check": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "reply",
+            "pause"
+          ]
+        }
+      },
+      "required": [
+        "tone",
+        "reason",
+        "check",
+        "action"
+      ]
+    }
+  },
+  "required": [
+    "title",
+    "feeling",
+    "need",
+    "question",
+    "avoid",
+    "hypotheses",
+    "replies",
+    "recommendation"
+  ]
 }
