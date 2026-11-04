@@ -54,7 +54,7 @@ export function normalizeContactMemory(chat){
   const targetId=libraryId(record.targetId);if(contextIds.at(-1)!==targetId)throw new Error('分析目标与保存的前文不一致。');
   const contextInfo=normalizeContextInfo(record.contextInfo,context.length);if(contextInfo&&contextInfo.sentAt.some((time,index)=>time!==(context[index].sentAt||0)))throw new Error('分析记录的发言时间与原文不一致。');
   const relationshipContext=normalizeRelationshipContext(record.relationshipContext,context.length);if(relationshipContext&&(!contextInfo||relationshipContext.sourceCount>contextInfo.availableCount))throw new Error('关系背景来自目标之后的历史，已停止覆盖。');
-  const result=structuredClone(record.result);if(!result||!['ai','local'].includes(result.mode))throw new Error('分析类型不正确。');validateClientAnalysis({...result,mode:'ai'},{messages:context,targetIndex:context.length-1});
+  const result=structuredClone(record.result);if(!result||!['ai','local'].includes(result.mode))throw new Error('分析类型不正确。');validateClientAnalysis({...result,mode:'ai'},{messages:context,targetIndex:context.length-1,contextInfo,replyOptions:record.replyOptions});
   const drafts={};for(const tone of ['warm','honest','brief'])if(record.drafts?.[tone]!==undefined)drafts[tone]=libraryText(record.drafts[tone],2000);
   return {id,createdAt:libraryTime(record.createdAt),updatedAt:libraryTime(record.updatedAt??record.createdAt),targetId,contextIds,contextInfo,relationshipContext,result,tone:['warm','honest','brief'].includes(record.tone)?record.tone:'warm',drafts,note:libraryText(record.note,2000),style:libraryText(record.style,1000),replyOptions:normalizeReplyOptions(record.replyOptions)};
  }).sort((a,b)=>b.createdAt-a.createdAt||a.id.localeCompare(b.id));

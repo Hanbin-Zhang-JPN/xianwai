@@ -1,0 +1,118 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "tone": {
+            "type": "string",
+            "enum": [
+              "warm",
+              "honest",
+              "brief"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "review"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "quote": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "quote",
+                "reason"
+              ]
+            },
+            "maxItems": 4
+          }
+        },
+        "required": [
+          "tone",
+          "status",
+          "reason",
+          "issues"
+        ]
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "tentative",
+            "review"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "quote": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "quote",
+              "reason"
+            ]
+          },
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "issues"
+      ]
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "reply",
+        "pause"
+      ]
+    },
+    "actionReason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "replies",
+    "interpretation",
+    "action",
+    "actionReason"
+  ]
+}

@@ -1,3 +1,4 @@
+import {normalizeReplyVerification} from './reply-verification.js';
 import {normalizeRelationshipContext} from './relationship-review.js';
 import {normalizeContextInfo} from './history-context.js';
 import {contextFor} from './core.js';
@@ -9,11 +10,11 @@ export function validateClientAnalysis(value,input){
  const validEvidence=ids=>Array.isArray(ids)&&ids.length>0&&ids.length<=6&&ids.every(id=>Number.isInteger(id)&&id>=1&&id<=count);
  if(!value||value.mode!=='ai'||value.contextCount!==count||!['title','feeling','need','question','avoid'].every(key=>validText(value[key]))||!Array.isArray(value.replies)||value.replies.length!==3||!Array.isArray(value.facts)||!value.facts.length||!Array.isArray(value.hypotheses)||value.hypotheses.length<2||value.hypotheses.length>3)throw new Error('分析结果格式不正确，请重试。');
  if(value.replies.some((reply,index)=>!reply||reply.tone!==['warm','honest','brief'][index]||!['text','label','reason'].every(key=>validText(reply[key])))||[...value.facts,...value.hypotheses].some(item=>!item||!validText(item.text,2400)||!validEvidence(item.evidence)))throw new Error('分析结果中的回复或原话引用不正确，请重试。');
- normalizeRecommendation(value.recommendation);
+ normalizeRecommendation(value.recommendation);normalizeReplyVerification(value.verification,value,input);if(input.verify===true&&!value.verification)throw new Error('Mac 未返回回复核对结果，请更新 Mac 后重试。');
  return value;
 }
 
-export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=700,timeout=170000}={}){
+export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInterval=700,timeout=330000,now=()=>Date.now(),cacheTTL=600000}={}){
  let active=null,cancellation=Promise.resolve();
  const cache=new Map();
  const wait=(signal)=>new Promise((resolve,reject)=>{
@@ -46,7 +47,7 @@ export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInte
    await cancellation;
    if(current.controller.signal.aborted||active!==current)throw aborted();
    const key=JSON.stringify({base:current.base,token,input});
-   if(cache.has(key)){complete=true;return cache.get(key);}
+   if(cache.has(key)){const entry=cache.get(key),age=now()-entry.savedAt;if(age>=0&&age<=cacheTTL){complete=true;return entry.result;}cache.delete(key);}
    const headers={'Content-Type':'application/json',Authorization:'Bearer '+token};
    current.submitted=true;
    let response=await fetcher(current.base+'/api/analyze',{method:'POST',headers,body:JSON.stringify({...input,requestId:current.id}),signal:current.controller.signal});
@@ -64,7 +65,7 @@ export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInte
    }
    validateClientAnalysis(result,input);
    if(current.controller.signal.aborted||active!==current)throw aborted();
-   complete=true;cache.set(key,result);if(cache.size>30)cache.delete(cache.keys().next().value);
+   complete=true;cache.set(key,{result,savedAt:now()});if(cache.size>30)cache.delete(cache.keys().next().value);
    return result;
   }catch(error){
    if(timedOut)throw new DOMException('分析超时，请检查 Mac 连接后重试。','TimeoutError');

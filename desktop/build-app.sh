@@ -13,7 +13,7 @@ swiftc -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" -target arm
 swift -sdk "$SDK_PATH" -module-cache-path "$SWIFT_MODULECACHE_PATH" "$PROJECT_DIR/desktop/GenerateIcon.swift" "$PROJECT_DIR/dist/app-icon.png"
 cp "$PROJECT_DIR/dist/app-icon.png" "$APP_DIR/Contents/Resources/app-icon.png"
 cp -R "$PROJECT_DIR/dist" "$APP_DIR/Contents/Resources/Runtime/"
-cp "$PROJECT_DIR/lib/ai.mjs" "$PROJECT_DIR/lib/codex.mjs" "$PROJECT_DIR/lib/workspace-store.mjs" "$PROJECT_DIR/lib/process.mjs" "$PROJECT_DIR/lib/history-review.mjs" "$PROJECT_DIR/lib/jobs.mjs" "$PROJECT_DIR/lib/history-chunk.schema.json" "$PROJECT_DIR/lib/history-report.schema.json" "$PROJECT_DIR/lib/analysis.schema.json" "$APP_DIR/Contents/Resources/Runtime/lib/"
+cp "$PROJECT_DIR/lib/ai.mjs" "$PROJECT_DIR/lib/codex.mjs" "$PROJECT_DIR/lib/workspace-store.mjs" "$PROJECT_DIR/lib/process.mjs" "$PROJECT_DIR/lib/history-review.mjs" "$PROJECT_DIR/lib/jobs.mjs" "$PROJECT_DIR/lib/reply-verification.mjs" "$PROJECT_DIR/lib/reply-verification.schema.json" "$PROJECT_DIR/lib/history-chunk.schema.json" "$PROJECT_DIR/lib/history-report.schema.json" "$PROJECT_DIR/lib/analysis.schema.json" "$APP_DIR/Contents/Resources/Runtime/lib/"
 cp "$PROJECT_DIR/desktop/runtime-server.mjs" "$APP_DIR/Contents/Resources/Runtime/desktop/"
 printf '%s\n' '{"type":"module"}' > "$APP_DIR/Contents/Resources/Runtime/package.json"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
@@ -24,8 +24,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.hanbin.xianwai</string>
 <key>CFBundleName</key><string>弦外</string>
 <key>CFBundleDisplayName</key><string>弦外</string>
-<key>CFBundleVersion</key><string>14</string>
-<key>CFBundleShortVersionString</key><string>0.7.0</string>
+<key>CFBundleVersion</key><string>15</string>
+<key>CFBundleShortVersionString</key><string>0.7.1</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>app-icon.png</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
