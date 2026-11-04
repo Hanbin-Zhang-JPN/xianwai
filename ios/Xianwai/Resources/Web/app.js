@@ -18,6 +18,39 @@ function replyCopyProblem(text){
  return '';
 }
 
+function createMessageGesture({schedule=(callback,ms)=>setTimeout(callback,ms),unschedule=id=>clearTimeout(id),now=()=>performance.now(),delay=450}={}){
+ let pending=null,last=null;
+ function cancel(){if(pending)unschedule(pending.timer);pending=null;}
+ function reset(){cancel();last=null;}
+ function suppresses(key){return !!last&&last.key===key&&now()<last.until;}
+ function activate(key,isCurrent,action){
+  cancel();if(!isCurrent()||suppresses(key))return false;
+  last={key,until:now()+1000};action();return true;
+ }
+ function start(key,isCurrent,action){
+  reset();const press={key,isCurrent,action};pending=press;
+  press.timer=schedule(()=>{if(pending===press){pending=null;activate(key,isCurrent,action);}},delay);
+ }
+ return {start,cancel,reset,suppresses,activate};
+}
+
+function createConnectionMonitor({current,probe,onStatus,onFailure}){
+ let active=null;
+ const same=(a,b)=>!!a&&!!b&&a.endpoint===b.endpoint&&a.token===b.token;
+ function invalidate(){const old=active;active=null;old?.controller.abort();}
+ async function check(){
+  const pair=current();if(!pair||active)return false;
+  const task={pair:{...pair},controller:new AbortController()};active=task;
+  const valid=()=>active===task&&!task.controller.signal.aborted&&same(task.pair,current());
+  try{
+   let status,error;try{status=await probe(task.pair,task.controller.signal);}catch(issue){error=issue;}
+   if(!valid())return false;
+   if(error)onFailure(error);else onStatus(status);return !error;
+  }finally{if(active===task)active=null;}
+ }
+ return {check,invalidate};
+}
+
 const LIMITS = { messages: 300, text: 2000, total: 80000 };
 function parseTranscript(raw) {
  const text = raw.trim();
@@ -406,6 +439,13 @@ function restoreAnalysisView(state,snapshot,now=Date.now()){
  state.loading=false;state.analysisError='';return true;
 }
 
+function reopenAnalysisView(state,chatId,recordId){
+ if(state.loading||state.active!==chatId||state.activeRecord!==recordId||!state.analysis)return false;
+ const snapshot=captureAnalysisView(state);
+ if(snapshot?.recordId!==recordId||!restoreAnalysisView(state,snapshot))return false;
+ state.page='chat';state.mobileSheet=true;return true;
+}
+
 
 const bounded=(value,max,name,fallback)=>{
  if(value===undefined&&fallback!==undefined)return fallback;
@@ -584,10 +624,11 @@ const cancelAnalysis=()=>analysisClient.cancel();
 
 function startCompanion(api){
  const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
- let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='',heartbeat=null;
+ let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='';
  let contextVersion=0;
  const sync=createWorkspaceSync({onError:error=>{syncError=connectionError(error);draw();toast(syncError);}});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
+ const heartbeat=createConnectionMonitor({current:()=>{const s=getState();return document.hidden||pairTask||!connected||!s.token?null:{endpoint:endpoint()||location.origin,token:s.token};},probe:(pair,signal)=>probeConnection(pair,{attempts:1,signal}),onStatus:status=>{connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();},onFailure:()=>{phase='offline';draw();}});
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
  const localWorkspace=()=>{const s=getState();return {schemaVersion:5,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
@@ -602,9 +643,9 @@ function startCompanion(api){
   const abort=()=>{observer.disconnect();reject(new DOMException('已取消连接','AbortError'));};
   const observer=new MutationObserver(check);if(signal.aborted){abort();return;}signal.addEventListener('abort',abort,{once:true});observer.observe(root,{childList:true,subtree:true});check();
  });}
- function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){phase='disconnected';draw();}}
+ function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){heartbeat.invalidate();phase='disconnected';draw();}}
  function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;}
- function disconnect(){cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
+ function disconnect(){heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
  function draw(){
   const s=getState(),bench=document.querySelector('.workbench');
   if(bench&&!document.querySelector('.quick-actions')){
@@ -624,7 +665,7 @@ function startCompanion(api){
  const parsePair=parsePairLink;
  function pairingModal(pair){pendingPair=pair;const hash=new URLSearchParams({key:pair.token});if(pair.endpoint!==location.origin)hash.set('bridge',pair.endpoint);history.replaceState(null,'',location.pathname+location.search+'#'+hash.toString());const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" ${getState().persist?'checked':''}>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-companion="edit-pair">更换配对链接</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
  async function connect(pair,options={}){
-  cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();
+  const retained=api.captureView?.();heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();if(api.restoreView?.(retained))render();
   const task={controller:new AbortController(),owner:options.owner};pairTask=task;
   const valid=()=>pairTask===task&&!task.controller.signal.aborted&&(!task.owner||task.owner.isConnected);
   const timeout=setTimeout(()=>task.controller.abort(),30000);
@@ -634,12 +675,12 @@ function startCompanion(api){
    let restored=null,revision=0;
    if(options.save){if(status.workspaceSchema!==5)throw new Error('请先将 Mac 上的弦外升级到 0.5.0，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
-   const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
+   const latestView=api.captureView?.(),s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
    if(restored)applyWorkspace(restored.workspace);
    connected=true;ocrAvailable=!!status.ocr;aiReady=status.ready;phase='connected';syncError='';
    if(options.save)sync.connect({...pair,revision});
    rememberPair(pair,options.remember);api.persist();
-   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
+   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();if(!api.restoreView?.(latestView))api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
   }catch(error){
    if(pairTask!==task||(task.owner&&!task.owner.isConnected))return;
    phase='offline';draw();
@@ -710,14 +751,7 @@ function startCompanion(api){
  const hash=new URLSearchParams(location.hash.slice(1));
  if(hash.has('key')){try{const pair=parsePair(location.href);pairingModal(pair);}catch(error){toast(error.message);}}
  else{let saved,remember=true,savedLive=true;try{const local=safeStorage.read('localStorage','xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||safeStorage.read('sessionStorage','xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
- async function checkConnection(){
-  const s=getState();if(document.hidden||pairTask||heartbeat||!s.token)return;
-  const pair={endpoint:endpoint()||location.origin,token:s.token};
-  heartbeat=probeConnection(pair,{attempts:1});
-  try{const status=await heartbeat;if(s!==getState()||pair.token!==getState().token||pair.endpoint!==(endpoint()||location.origin))return;connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();}
-  catch{if(pair.token===getState().token){phase='offline';draw();}}
-  finally{heartbeat=null;}
- }
+ const checkConnection=()=>heartbeat.check();
  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkConnection();else void sync.flush();});
  window.addEventListener('online',()=>void checkConnection());
  window.addEventListener('pagehide',()=>void sync.flush());
@@ -806,6 +840,7 @@ state={...state,...normalizeWorkspace(state),persist:readPersistencePreference()
 let localRecovery=null;
 try{const raw=safeStorage.read('localStorage','xianwai-v1');if(raw){try{const saved=JSON.parse(raw);if(saved?.persist&&state.persist){const workspace=normalizeWorkspace(saved);if(!workspace.chats.length)throw new Error();state={...state,...workspace,persist:true};}}catch{localRecovery=raw;}}}catch{}
 const $=(s,root=document)=>root.querySelector(s);const current=()=>state.chats.find(c=>c.id===state.active)||state.chats[0];let generation=0,toastTimer,reviewRows=[],clearing=false,progressTimer,regeneration=null;
+const messageGesture=createMessageGesture();
 state.tone=current().preferredTone||'warm';
 function adoptCurrent(){const c=current();if(samples.some(sample=>sample.id===c.id)){c.id=crypto.randomUUID();state.active=c.id;c.title='我的聊天';c.name='对方';c.subtitle='已导入的聊天';}return c;}
 function persist(){
@@ -815,6 +850,7 @@ function persist(){
  const status=$('#local-save-state');if(status)status.textContent=state.saveError||(state.persist?'已自动保存':'仅当前页面');
 }
 function removeFavorite(id){if(!state.favorites.some(item=>item.id===id))return;const ids=[...new Set([...state.deletedFavoriteIds,id])];if(ids.length>1000){toast('收藏删除记录已满，请先导出资料库。');return false;}state.deletedFavoriteIds=ids;state.favorites=state.favorites.filter(item=>item.id!==id);return true;}
+function markEditing(){state.activeUpdatedAt=Math.max(Date.now(),(state.activeUpdatedAt||0)+1);}
 function saveProgress(recordChanged=false){const c=current();if(recordChanged&&state.activeRecord)updateRecordDraft(c,state.activeRecord,state.tone,state.replyDrafts);clearTimeout(progressTimer);progressTimer=setTimeout(persist,350);}
 function savedRecord(){return current().analyses?.find(record=>record.id===state.activeRecord);}
 function restoreProgress(open=false){
@@ -824,6 +860,7 @@ function restoreProgress(open=false){
 }
 function openRecord(chatId,recordId){
  const chat=state.chats.find(chat=>chat.id===chatId);if(!chat?.analyses.some(record=>record.id===recordId))return;
+ if(reopenAnalysisView(state,chatId,recordId)){markEditing();persist();closeModal();render();return;}
  invalidate();state.active=chatId;state.activeUpdatedAt=Date.now();state.page='chat';chat.resumeId=recordId;chat.resumeUpdatedAt=Date.now();restoreProgress(true);persist();closeModal();render();
 }
 function toast(t){const node=$('#toast');node.textContent=t;node.classList.add('toast-show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('toast-show'),3200);}
@@ -901,7 +938,7 @@ async function analyze(index,open=true,options={}){
  }catch(error){if(seq!==generation)return;if(previous)Object.assign(state,previous);state.analysisError=(previous?'重新起草未完成，原稿已保留。':'')+(error.name==='TimeoutError'?'分析超时，请检查 Mac 后重试。':error.message);toast(state.analysisError);}
  finally{if(seq===generation){regeneration=null;state.loading=false;render();}}
 }
-function invalidate(){regeneration=null;state.replyForm=normalizeReplyOptions();state.analysisTarget=null;generation++;void cancelAnalysis();state.loading=false;state.analysis=null;state.selected=null;state.replyDrafts={};state.undoRecord=null;state.analysisError='';state.activeRecord=null;document.dispatchEvent(new Event('xianwai-context-changing'));}
+function invalidate(){messageGesture.reset();regeneration=null;state.replyForm=normalizeReplyOptions();state.analysisTarget=null;generation++;void cancelAnalysis();state.loading=false;state.analysis=null;state.selected=null;state.replyDrafts={};state.undoRecord=null;state.analysisError='';state.activeRecord=null;document.dispatchEvent(new Event('xianwai-context-changing'));}
 function selectChat(id){if(!state.chats.some(chat=>chat.id===id))return;invalidate();closeModal();state.active=id;state.activeUpdatedAt=Date.now();state.page='chat';restoreProgress();persist();render();}
 function modal(title,intro,body,footer=''){if(clearing)return;document.dispatchEvent(new Event('xianwai-modal-closing'));const root=$('#modal-root');root.innerHTML=`<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭窗口">${icon('close')}</button></div><p class="intro">${intro}</p>${body}<div class="error" id="modal-error" role="alert"></div><div class="modal-footer">${footer}</div></section></div>`;const focusable=root.querySelectorAll('button,input,textarea,select');setTimeout(()=>focusable[1]?.focus(),20);}
 function closeModal(){if(clearing)return;document.dispatchEvent(new Event('xianwai-modal-closing'));$('#modal-root').innerHTML='';}
@@ -933,24 +970,37 @@ function editProfile(){
  `<button class="outline-btn" data-library-action="export-contact">${icon('download')}导出联系人资料</button><button class="primary-btn" data-action="save-profile">保存习惯与背景</button>`);
 }
 async function copyText(t){const problem=replyCopyProblem(t);if(problem){toast(problem);return;}if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'copy',text:t});toast('已复制，回微信前再确认一下语气。');return;}try{await navigator.clipboard.writeText(t);toast('已复制，回微信前再确认一下语气。');}catch{modal('复制这句话','浏览器未允许自动复制，可选择下面的文字手动复制。',`<textarea id="manual-copy">${esc(t)}</textarea>`,`<button class="primary-btn" data-action="close-modal">完成</button>`);$('#manual-copy').select();}}
-document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-action]');if(!b)return;const action=b.dataset.action;if(b.dataset.page){state.page=b.dataset.page;if(state.page==='history'){state.historyContact='all';state.historyQuery='';}state.mobileSheet=false;render();return;}if(b.dataset.chat){selectChat(b.dataset.chat);return;}if(b.dataset.message!==undefined){analyze(Number(b.dataset.message));return;}if(b.dataset.ref!==undefined){if(matchMedia('(max-width:950px)').matches){state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');}const msg=$('#msg-'+b.dataset.ref);msg?.scrollIntoView({behavior:'smooth',block:'center'});msg?.animate([{opacity:.4},{opacity:1}],{duration:600});return;}if(b.dataset.tone){state.tone=b.dataset.tone;setContactTone(current(),state.tone);saveProgress(true);persist();renderAnalysis();return;}if(b.dataset.copy!==undefined){copyText(state.analysis.replies[Number(b.dataset.copy)].text);return;}if(b.dataset.edit!==undefined){const r=state.analysis.replies[Number(b.dataset.edit)];modal('改成你自己的话','先确认回复符合真实情况，再复制发送。',`<textarea id="edit-reply">${esc(r.text)}</textarea>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="copy-edited">${icon('copy')}复制编辑后的回复</button>`);return;}if(b.dataset.save!==undefined){const r=state.analysis.replies[Number(b.dataset.save)],existing=state.favorites.find(f=>f.text===r.text);if(!existing&&state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');return;}if(existing){if(!removeFavorite(existing.id))return;}else state.favorites.unshift({id:crypto.randomUUID(),text:r.text,label:r.label,name:current().name,source:current().title});persist();renderAnalysis();const count=$('.nav-item[data-page="favorites"] .count');if(count)count.textContent=state.favorites.length;toast(existing?'已移除收藏':'已收藏这句话');return;}if(b.dataset.favCopy){copyText(state.favorites.find(f=>f.id===b.dataset.favCopy).text);return;}if(b.dataset.favRemove){if(!removeFavorite(b.dataset.favRemove))return;persist();render();return;}if(b.dataset.moveRow!==undefined){reviewRows=collectRows();const from=Number(b.dataset.moveRow),to=from+Number(b.dataset.direction);if(to>=0&&to<reviewRows.length)[reviewRows[from],reviewRows[to]]=[reviewRows[to],reviewRows[from]];showReview();return;}if(b.dataset.removeRow!==undefined){reviewRows=collectRows();reviewRows.splice(Number(b.dataset.removeRow),1);showReview();return;}
+document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-action]');if(!b)return;const action=b.dataset.action;if(b.dataset.page){state.page=b.dataset.page;if(state.page==='history'){state.historyContact='all';state.historyQuery='';}state.mobileSheet=false;render();return;}if(b.dataset.chat){selectChat(b.dataset.chat);return;}if(b.dataset.message!==undefined){analyze(Number(b.dataset.message));return;}if(b.dataset.ref!==undefined){if(matchMedia('(max-width:950px)').matches){state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');}const msg=$('#msg-'+b.dataset.ref);msg?.scrollIntoView({behavior:'smooth',block:'center'});msg?.animate([{opacity:.4},{opacity:1}],{duration:600});return;}if(b.dataset.tone){markEditing();state.tone=b.dataset.tone;setContactTone(current(),state.tone);saveProgress(true);persist();renderAnalysis();return;}if(b.dataset.copy!==undefined){copyText(state.analysis.replies[Number(b.dataset.copy)].text);return;}if(b.dataset.edit!==undefined){const r=state.analysis.replies[Number(b.dataset.edit)];modal('改成你自己的话','先确认回复符合真实情况，再复制发送。',`<textarea id="edit-reply">${esc(r.text)}</textarea>`,`<button class="outline-btn" data-action="close-modal">取消</button><button class="primary-btn" data-action="copy-edited">${icon('copy')}复制编辑后的回复</button>`);return;}if(b.dataset.save!==undefined){const r=state.analysis.replies[Number(b.dataset.save)],existing=state.favorites.find(f=>f.text===r.text);if(!existing&&state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');return;}if(existing){if(!removeFavorite(existing.id))return;}else state.favorites.unshift({id:crypto.randomUUID(),text:r.text,label:r.label,name:current().name,source:current().title});persist();renderAnalysis();const count=$('.nav-item[data-page="favorites"] .count');if(count)count.textContent=state.favorites.length;toast(existing?'已移除收藏':'已收藏这句话');return;}if(b.dataset.favCopy){copyText(state.favorites.find(f=>f.id===b.dataset.favCopy).text);return;}if(b.dataset.favRemove){if(!removeFavorite(b.dataset.favRemove))return;persist();render();return;}if(b.dataset.moveRow!==undefined){reviewRows=collectRows();const from=Number(b.dataset.moveRow),to=from+Number(b.dataset.direction);if(to>=0&&to<reviewRows.length)[reviewRows[from],reviewRows[to]]=[reviewRows[to],reviewRows[from]];showReview();return;}if(b.dataset.removeRow!==undefined){reviewRows=collectRows();reviewRows.splice(Number(b.dataset.removeRow),1);showReview();return;}
 switch(action){case'regenerate-reply':{if(!state.live){toast('请先连接 Mac 并开启 AI。');break;}const replyOptions=normalizeReplyOptions({goal:$('#reply-goal').value,context:$('#reply-context').value});await analyze(state.selected,true,{regenerate:true,recordId:state.activeRecord,replyOptions});break;}case'menu':$('#sidebar').classList.toggle('open');break;case'import':openImport();break;case'close-modal':closeModal();break;case'settings':settings();break;case'profile':editProfile();break;case'close-analysis':state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');break;case'new':libraryUI.newContact();break;case'choose-file':$('#file-input').click();break;case'parse':try{reviewRows=parseTranscript($('#transcript').value);showReview();}catch(err){modalError(err.message);}break;case'back-import':{reviewRows=collectRows();openImport(reviewRows.map(r=>(r.role==='me'?'我':'对方')+'：'+r.text).join('\n'));break;}case'confirm-import':await confirmImport(false);break;case'import-and-reply':await confirmImport(true);break;case'swap-review':reviewRows=collectRows().map(r=>({...r,role:r.role==='me'?'partner':'me'}));showReview();break;case'reply-latest':{const i=latestPartnerIndex(current().messages);if(i>=0)analyze(i);break;}case'copy-draft':await copyText($('#reply-draft').value);break;case'save-draft':{if(state.favorites.length>=300){toast('收藏已满 300 条，请先移除部分收藏。');break;}const text=$('#reply-draft').value.trim();if(text&&!state.favorites.some(f=>f.text===text)){state.favorites.unshift({id:crypto.randomUUID(),text,label:TONES.find(t=>t.id===state.tone)?.label||'草稿',name:current().name,source:current().title});persist();const count=$('.nav-item[data-page="favorites"] .count');if(count)count.textContent=state.favorites.length;toast('已收藏你编辑后的草稿。');}break;}case'record-draft':{const original=current(),text=$('#reply-draft').value.trim();if(needsReplyDetails(text)){toast('请先把“待补充”替换成实际信息，再记录已发出。');break;}try{saveProgress(true);const result=addContactMessage(original.messages,text,'me'),memory=normalizeContactMemory({...original,messages:result.messages}),c=adoptCurrent();Object.assign(c,memory);touchContact(c);state.undoRecord=result.reused?null:{chatId:c.id,snapshot:JSON.stringify(c.messages),activeRecord:state.activeRecord,analysis:state.analysis,selected:state.selected,tone:state.tone,replyForm:{...state.replyForm},drafts:{...state.replyDrafts}};state.selected=null;state.analysis=null;state.activeRecord=null;state.mobileSheet=false;persist();render();toast(result.reused?'这句已经在前文中。':'已记录为你发出的消息，下次会一起参考。');}catch(error){toast(error.message);}break;}case'undo-record':{const c=current();if(canUndoRecord(state.undoRecord,c)){const undo=state.undoRecord;if(!undoSentMessage(c,undo.snapshot)){toast('前文已变更，未执行撤销。');break;}invalidate();c.resumeId=undo.activeRecord||null;c.resumeUpdatedAt=Date.now();state.undoRecord=null;state.analysis=undo.analysis;state.activeRecord=undo.activeRecord;state.selected=undo.selected;touchContact(c);state.tone=undo.tone;state.replyForm=normalizeReplyOptions(undo.replyForm);state.replyDrafts=undo.drafts;state.mobileSheet=true;persist();render();toast('已撤销记录，编辑过的草稿也已恢复。');}break;}case'screenshot':if(window.xianwaiImportScreenshots){window.xianwaiImportScreenshots();}else if(window.webkit?.messageHandlers?.xianwai){toast('正在打开相册，图片将在本机识别。');window.webkit.messageHandlers.xianwai.postMessage({action:'pickScreenshot'});}else{modal('在 iPhone 上识别截图','网页原型暂不识别图片。iPhone 源码版内置 Apple Vision 本机文字识别。',`<div class="notice">在 iPhone App 的“导入聊天 → 截图识别”中，从相册选择截图。识别后的文字先进入核对界面，不会自动上传。网页可以粘贴已有文字，或导入 TXT / JSON。</div>`,`<button class="primary-btn" data-action="import">返回文字导入</button>`);}break;case'save-settings':{const retainedView=captureAnalysisView(regeneration?{...state,...regeneration.previous}:state);const endpoint=$('#endpoint').value.trim().replace(/\/$/,'');if(endpoint){try{const u=new URL(endpoint);if(u.username||u.password||u.search||u.hash||u.pathname!=='/'||(u.protocol!=='https:'&&!(u.protocol==='http:'&&['127.0.0.1','localhost'].includes(u.hostname))))throw new Error();}catch{modalError('请输入不带路径和参数的 HTTPS 后端地址，本机可用 http://localhost:4388。');break;}}const owner=$('#modal-root .modal'),candidate={endpoint,token:$('#token').value.trim(),persist:$('#persist').checked,live:$('#live').checked};b.disabled=true;const settingsTask=new AbortController(),abortSettings=()=>settingsTask.abort();document.addEventListener('xianwai-modal-closing',abortSettings,{once:true});try{await window.xianwaiBeforeSettings?.(candidate,settingsTask.signal);if(!owner.isConnected)break;invalidate();Object.assign(state,candidate);if(!restoreAnalysisView(state,retainedView))restoreProgress();window.xianwaiSettingsSaved?.();persist();}catch(error){if(owner.isConnected){modalError(error.message);b.disabled=false;}break;}finally{document.removeEventListener('xianwai-modal-closing',abortSettings);}closeModal();render();toast(state.live?'已开启在线 AI，聊天将发送至你配置的服务。':'已切换为本地规则试用');break;}case'save-profile':{invalidate();const c=adoptCurrent();setContactProfile(c,{title:$('#chat-title').value.trim()||'新的对话',name:$('#partner-name').value.trim()||'对方',note:$('#context-note').value.trim(),style:$('#reply-style').value.trim()});setContactTone(c,$('#preferred-tone').value);moveContact(c,$('#profile-folder').value);touchContact(c);state.tone=c.preferredTone;persist();closeModal();state.analysis=null;state.selected=null;render();toast('已保存，下一次起草会参考你的习惯。');break;}case'copy-edited':copyText($('#edit-reply').value);break;case'retry':if(state.selected!==null)analyze(state.selected);break;case'export':{const c=current(),data=JSON.stringify(c.messages,null,2);if(window.webkit?.messageHandlers?.xianwai){window.webkit.messageHandlers.xianwai.postMessage({action:'export',text:data});break;}const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='弦外-聊天.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('已导出聊天 JSON');break;}case'clear':modal('清除聊天与收藏','这会删除当前资料库的联系人、文件夹、分析、草稿和收藏，以及已连接 Mac 的备份，并关闭保存。请先导出需要保留的聊天。',`<div class="notice">无法撤销此操作。如已配对，Mac 备份删除成功后才会清除本机内容。</div>`,`<button class="outline-btn" data-action="settings">返回设置</button><button class="primary-btn" data-action="confirm-clear">确认清除</button>`);break;case'confirm-clear':{if(clearing)break;const owner=$('#modal-root .modal');clearing=true;owner.querySelectorAll('button').forEach(button=>button.disabled=true);invalidate();try{await window.xianwaiDeleteBackup?.();clearing=false;localRecovery=null;const chat={...freshChat,id:crypto.randomUUID(),...normalizeContactMemory({messages:[]})};state={...state,folders:[],deletedFavoriteIds:[],activeUpdatedAt:0,chats:[chat],favorites:[],persist:false,active:chat.id,selected:null,analysis:null,loading:false,page:'chat',mobileSheet:false,composerDrafts:{}};persist();closeModal();render();toast('已清除联系人资料库与收藏，并关闭保存。');}catch(error){clearing=false;modalError(error.message);owner.querySelectorAll('button').forEach(button=>button.disabled=false);}break;}case'download-recovery':{const url=URL.createObjectURL(new Blob([localRecovery||''],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='弦外-原始记录备份.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);break;}}});
 document.addEventListener('submit',async e=>{
  if(e.target.id!=='composer')return;e.preventDefault();const f=e.target,text=f.elements.message.value.trim(),role=f.elements.role.value;if(!text){toast('先粘贴对方的一句话。');return;}
  if(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')){openImport(text);return;}
  try{const c=current(),result=addContactMessage(samples.some(x=>x.id===c.id)?[]:c.messages,text,role);const memory=normalizeContactMemory({...c,messages:result.messages}),priorId=c.id;adoptCurrent();delete state.composerDrafts[priorId];invalidate();Object.assign(c,memory);setContactComposer(c,{text:'',role});touchContact(c);state.analysis=null;state.selected=null;state.replyDrafts={};persist();if(role==='partner')await analyze(c.messages.length-1);else{render();toast(result.reused?'这句已经在前文中。':'已把你的回复加入前文。');}}catch(error){toast(error.message);}
 });
-document.addEventListener('change',async e=>{if(e.target.id==='reply-goal'){state.replyForm=normalizeReplyOptions({...state.replyForm,goal:e.target.value});return;}if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:e.target.value};setContactComposer(current(),state.composerDrafts[state.active]);saveProgress();$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{const input=$('#transcript'),chatId=state.active,text=await f.text();if(!input?.isConnected||state.active!==chatId)return;input.value=text;toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
+document.addEventListener('change',async e=>{if(e.target.id==='reply-goal'){markEditing();state.replyForm=normalizeReplyOptions({...state.replyForm,goal:e.target.value});return;}if(e.target.id==='active-chat'){selectChat(e.target.value);return;}if(e.target.closest('.review-row')||['append-import','dedupe-import'].includes(e.target.id)){updateReviewSummary();return;}if(e.target.name==='role'&&e.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:e.target.value};setContactComposer(current(),state.composerDrafts[state.active]);saveProgress();$('#composer button').innerHTML=e.target.value==='me'?'记录这句':'帮我回 '+icon('arrow');return;}if(e.target.id!=='file-input')return;const f=e.target.files[0];if(!f)return;if(f.size>500000){modalError('文件超过 500 KB，请拆分后导入。');return;}try{const input=$('#transcript'),chatId=state.active,text=await f.text();if(!input?.isConnected||state.active!==chatId)return;input.value=text;toast('已读取文件，下一步核对消息。');}catch{modalError('无法读取这个文件，请尝试粘贴文字。');}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();state.mobileSheet=false;$('.analysis-panel')?.classList.remove('open');$('.analysis-scrim')?.classList.remove('open');$('#sidebar')?.classList.remove('open');}if(e.key==='Tab'&&$('#modal-root .modal')){const items=[...$('#modal-root').querySelectorAll('button,input,textarea,select')].filter(x=>!x.hidden&&!x.disabled);if(e.shiftKey&&document.activeElement===items[0]){e.preventDefault();items.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===items.at(-1)){e.preventDefault();items[0]?.focus();}}});
-function bindLongPress(){document.querySelectorAll('[data-message]').forEach(b=>{let timer,x,y,fired=false;b.addEventListener('pointerdown',e=>{if(e.button!==0)return;fired=false;x=e.clientX;y=e.clientY;timer=setTimeout(()=>{fired=true;navigator.vibrate?.(15);analyze(Number(b.dataset.message));},450);});b.addEventListener('pointermove',e=>{if(Math.abs(e.clientX-x)>8||Math.abs(e.clientY-y)>8)clearTimeout(timer);});for(const event of ['pointerup','pointercancel','pointerleave'])b.addEventListener(event,()=>clearTimeout(timer));b.addEventListener('click',e=>{if(fired){e.preventDefault();e.stopPropagation();} });b.addEventListener('contextmenu',e=>{e.preventDefault();clearTimeout(timer);analyze(Number(b.dataset.message));});});}
+function bindLongPress(){
+ const chatId=state.active,version=generation;
+ document.querySelectorAll('[data-message]').forEach(button=>{
+  const index=Number(button.dataset.message),id=current().messages[index]?.id,key=JSON.stringify([chatId,id]);let x,y;
+  const valid=()=>button.isConnected&&state.active===chatId&&generation===version&&current().messages[index]?.id===id;
+  const activate=()=>{navigator.vibrate?.(15);analyze(index);};
+  button.addEventListener('pointerdown',event=>{if(event.button!==0)return;x=event.clientX;y=event.clientY;messageGesture.start(key,valid,activate);});
+  button.addEventListener('pointermove',event=>{if(Math.abs(event.clientX-x)>8||Math.abs(event.clientY-y)>8)messageGesture.cancel();});
+  for(const event of ['pointerup','pointercancel','pointerleave'])button.addEventListener(event,()=>messageGesture.cancel());
+  button.addEventListener('click',event=>{if(messageGesture.suppresses(key)){event.preventDefault();event.stopPropagation();}});
+  button.addEventListener('contextmenu',event=>{event.preventDefault();messageGesture.activate(key,valid,activate);});
+ });
+}
 window.xianwaiReceiveOCR=(rows)=>{try{reviewRows=validateMessages(rows).map(r=>({...r,uncertain:true}));showReview();toast('识别完成，请核对发送者、文字和顺序。');}catch(err){toast(err.message);}};
 window.xianwaiError=message=>toast(message);
 const libraryUI=createLibraryUI({getState:()=>state,current,modal,closeModal,persist,render,toast,selectChat,openRecord,icon,escape:esc,invalidate});
 restoreProgress();render();
 
-startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){if(text!==undefined){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));}input.focus();}else if(text!==undefined)openImport(text);},stopAnalysis:()=>{const pending=regeneration;invalidate();if(pending?.chatId===state.active){Object.assign(state,pending.previous);state.analysisError='已取消重新起草，原稿已保留。';}render();}});
+startCompanion({getState:()=>state,modal,closeModal,toast,render,showReview,setReviewRows:rows=>{reviewRows=rows;},escape:esc,persist,restoreProgress,captureView:()=>captureAnalysisView(regeneration?{...state,...regeneration.previous}:state),restoreView:snapshot=>restoreAnalysisView(state,snapshot),openImport,quickPaste:text=>{const input=$('#composer textarea');if(input){if(text!==undefined){input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));}input.focus();}else if(text!==undefined)openImport(text);},stopAnalysis:()=>{const pending=regeneration;invalidate();if(pending?.chatId===state.active){Object.assign(state,pending.previous);state.analysisError='已取消重新起草，原稿已保留。';}render();}});
 
 document.addEventListener('input',event=>{
+ if(event.target.id==='reply-context'||event.target.id==='reply-draft'||event.target.closest('#composer'))markEditing();
  if(event.target.id==='reply-context')state.replyForm=normalizeReplyOptions({...state.replyForm,context:event.target.value});
  if(event.target.closest('#composer')){state.composerDrafts[state.active]={text:$('#composer textarea').value,role:$('#composer select').value};setContactComposer(current(),state.composerDrafts[state.active]);saveProgress();}
  if(event.target.id==='reply-draft'){state.replyDrafts[state.tone]=event.target.value;const pending=needsReplyDetails(event.target.value),quick=$('.analysis-quick-copy'),note=$('.reply-placeholder-note');if(quick)quick.disabled=!!replyCopyProblem(event.target.value);if(note)note.hidden=!pending;saveProgress(true);}

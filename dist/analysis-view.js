@@ -25,3 +25,10 @@ export function restoreAnalysisView(state,snapshot,now=Date.now()){
  }
  state.loading=false;state.analysisError='';return true;
 }
+
+export function reopenAnalysisView(state,chatId,recordId){
+ if(state.loading||state.active!==chatId||state.activeRecord!==recordId||!state.analysis)return false;
+ const snapshot=captureAnalysisView(state);
+ if(snapshot?.recordId!==recordId||!restoreAnalysisView(state,snapshot))return false;
+ state.page='chat';state.mobileSheet=true;return true;
+}

@@ -4,16 +4,18 @@ import {mergeWorkspaces} from './workspace.js';
 import {validateMessages} from './core.js';
 import {safeStorage,parsePairLink,probeConnection,connectionError} from './pairing.js';
 import {pasteClipboard} from './clipboard.js';
+import {createConnectionMonitor} from './connection-monitor.js';
 
 export const requestAnalysis=async options=>{try{return await analysisClient.request(options);}catch(error){if(error.status===401)error.message=connectionError(error);if(error.status===401||error instanceof TypeError||error.name==='TimeoutError')document.dispatchEvent(new CustomEvent('xianwai-connection-error',{detail:connectionError(error)}));throw error;}};
 export const cancelAnalysis=()=>analysisClient.cancel();
 
 export function startCompanion(api){
  const {getState,modal,closeModal,toast,render,showReview,setReviewRows,stopAnalysis}=api;
- let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='',heartbeat=null;
+ let connected=false,ocrAvailable=false,aiReady=false,pendingPair=null,pairTask=null,ocrTask=null,nativeChat=null,phase='disconnected',syncError='';
  let contextVersion=0;
  const sync=createWorkspaceSync({onError:error=>{syncError=connectionError(error);draw();toast(syncError);}});
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
+ const heartbeat=createConnectionMonitor({current:()=>{const s=getState();return document.hidden||pairTask||!connected||!s.token?null:{endpoint:endpoint()||location.origin,token:s.token};},probe:(pair,signal)=>probeConnection(pair,{attempts:1,signal}),onStatus:status=>{connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();},onFailure:()=>{phase='offline';draw();}});
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
  const localWorkspace=()=>{const s=getState();return {schemaVersion:5,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
@@ -28,9 +30,9 @@ export function startCompanion(api){
   const abort=()=>{observer.disconnect();reject(new DOMException('已取消连接','AbortError'));};
   const observer=new MutationObserver(check);if(signal.aborted){abort();return;}signal.addEventListener('abort',abort,{once:true});observer.observe(root,{childList:true,subtree:true});check();
  });}
- function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){phase='disconnected';draw();}}
+ function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){heartbeat.invalidate();phase='disconnected';draw();}}
  function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;}
- function disconnect(){cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
+ function disconnect(){heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
  function draw(){
   const s=getState(),bench=document.querySelector('.workbench');
   if(bench&&!document.querySelector('.quick-actions')){
@@ -50,7 +52,7 @@ export function startCompanion(api){
  const parsePair=parsePairLink;
  function pairingModal(pair){pendingPair=pair;const hash=new URLSearchParams({key:pair.token});if(pair.endpoint!==location.origin)hash.set('bridge',pair.endpoint);history.replaceState(null,'',location.pathname+location.search+'#'+hash.toString());const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" ${getState().persist?'checked':''}>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-companion="edit-pair">更换配对链接</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
  async function connect(pair,options={}){
-  cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();
+  const retained=api.captureView?.();heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();if(api.restoreView?.(retained))render();
   const task={controller:new AbortController(),owner:options.owner};pairTask=task;
   const valid=()=>pairTask===task&&!task.controller.signal.aborted&&(!task.owner||task.owner.isConnected);
   const timeout=setTimeout(()=>task.controller.abort(),30000);
@@ -60,12 +62,12 @@ export function startCompanion(api){
    let restored=null,revision=0;
    if(options.save){if(status.workspaceSchema!==5)throw new Error('请先将 Mac 上的弦外升级到 0.5.0，再保存联系人、文件夹和分析记录。');const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
-   const s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
+   const latestView=api.captureView?.(),s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
    if(restored)applyWorkspace(restored.workspace);
    connected=true;ocrAvailable=!!status.ocr;aiReady=status.ready;phase='connected';syncError='';
    if(options.save)sync.connect({...pair,revision});
    rememberPair(pair,options.remember);api.persist();
-   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
+   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();if(!api.restoreView?.(latestView))api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
   }catch(error){
    if(pairTask!==task||(task.owner&&!task.owner.isConnected))return;
    phase='offline';draw();
@@ -136,14 +138,7 @@ export function startCompanion(api){
  const hash=new URLSearchParams(location.hash.slice(1));
  if(hash.has('key')){try{const pair=parsePair(location.href);pairingModal(pair);}catch(error){toast(error.message);}}
  else{let saved,remember=true,savedLive=true;try{const local=safeStorage.read('localStorage','xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||safeStorage.read('sessionStorage','xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
- async function checkConnection(){
-  const s=getState();if(document.hidden||pairTask||heartbeat||!s.token)return;
-  const pair={endpoint:endpoint()||location.origin,token:s.token};
-  heartbeat=probeConnection(pair,{attempts:1});
-  try{const status=await heartbeat;if(s!==getState()||pair.token!==getState().token||pair.endpoint!==(endpoint()||location.origin))return;connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();}
-  catch{if(pair.token===getState().token){phase='offline';draw();}}
-  finally{heartbeat=null;}
- }
+ const checkConnection=()=>heartbeat.check();
  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkConnection();else void sync.flush();});
  window.addEventListener('online',()=>void checkConnection());
  window.addEventListener('pagehide',()=>void sync.flush());
