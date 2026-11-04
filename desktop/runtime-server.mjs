@@ -1,3 +1,5 @@
+import {HistoryReviewRunner,validateHistoryInput,historySourceHash} from '../lib/history-review.mjs';
+import {pruneJobs} from '../lib/jobs.mjs';
 import {normalizeContextInfo} from '../dist/history-context.js';
 import http from 'node:http';
 import path from 'node:path';
@@ -16,9 +18,9 @@ import {execAndWait} from '../lib/process.mjs';
 const exec=promisify(execFile), root=fileURLToPath(new URL('../dist/',import.meta.url));
 const token=process.env.XIANWAI_TOKEN;
 if(!token||token.length<32)throw new Error('A strong pairing token is required.');
-const jobs=new Map(),ocrTasks=new Set();let active=null,stopping=false;let ready=false,ocrActive=0;
+const jobs=new Map(),ocrTasks=new Set();let active=null,stopping=false,clearingBackup=false,taskEpoch=0;let ready=false,ocrActive=0;
 const dataDirectory=process.env.XIANWAI_DATA_DIR||path.join(os.homedir(),'Library/Application Support/Xianwai');
-const workspaceStore=new WorkspaceStore(dataDirectory);
+const workspaceStore=new WorkspaceStore(dataDirectory),reviewRunner=new HistoryReviewRunner(path.join(dataDirectory,'history-review-cache'));
 let authCheckedAt=0,authCheck=null;
 async function refreshAuth(){
  if(authCheck)return authCheck;
@@ -38,29 +40,44 @@ const server=http.createServer(async(req,res)=>{
   if(origin){let allowed=origin==='null';try{const u=new URL(origin);allowed=u.protocol==='https:'||['127.0.0.1','localhost'].includes(u.hostname);}catch{}if(!allowed){send(res,403,{error:'来源不受支持。'});return;}res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');res.setHeader('Access-Control-Allow-Methods','GET, POST, DELETE, OPTIONS');}
   if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
-  if(stopping){send(res,503,{error:'Mac 服务正在关闭，请重新连接后再试。'});return;}
+  if(stopping||clearingBackup){send(res,503,{error:'Mac 服务正在关闭，请重新连接后再试。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.6.0',workspaceSchema:6,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.7.0',workspaceSchema:7,historyReview:true,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
-    if(req.method==='DELETE'){const input=await body(req);const value=await workspaceStore.clear(input?.baseRevision);send(res,200,{deleted:true,revision:value.revision});return;}
+    if(req.method==='DELETE'){const input=await body(req);clearingBackup=true;try{const value=await workspaceStore.clear(input?.baseRevision);taskEpoch++;const pending=[...jobs.values(),...ocrTasks];for(const task of pending)task.controller?.abort();await Promise.allSettled(pending.map(task=>task.finished));jobs.clear();await rm(reviewRunner.directory,{recursive:true,force:true});send(res,200,{deleted:true,revision:value.revision});}finally{clearingBackup=false;}return;}
     if(req.method==='POST'){const input=await body(req,40000000);const value=await workspaceStore.save(input,input?.baseRevision);send(res,200,{saved:true,revision:value.revision});return;}
    }
+   if(url.pathname==='/api/history-review'&&req.method==='GET'){
+    pruneJobs(jobs);const chatId=url.searchParams.get('chatId');const entry=[...jobs.entries()].reverse().find(([,job])=>job.kind==='history-review'&&(!chatId||job.chatId===chatId));
+    send(res,200,entry?{jobId:entry[0],chatId:entry[1].chatId,status:entry[1].status,progress:entry[1].progress||null,sourceHash:entry[1].sourceHash,...(entry[1].result?{result:entry[1].result}:{}),...(entry[1].error?{error:entry[1].error}:{})}:{status:'none'});return;
+   }
+   if(url.pathname==='/api/history-review'&&req.method==='POST'){
+    const epoch=taskEpoch;await refreshAuth();if(!ready){send(res,503,{error:'请先在 Mac 登录 Codex，再开始全量梳理。'});return;}
+    const input=validateHistoryInput(await body(req,12000000)),sourceHash=historySourceHash(input);pruneJobs(jobs);
+    const prior=[...jobs.entries()].find(([,job])=>job.kind==='history-review'&&job.sourceHash===sourceHash&&['running','completed'].includes(job.status));
+    if(prior){send(res,202,{jobId:prior[0],status:prior[1].status,sourceHash});return;}
+    if(active){send(res,429,{error:'Mac 还有任务正在处理，请等完成或先停止该任务。'});return;}
+    if(stopping||clearingBackup||epoch!==taskEpoch)throw new Error('资料或服务已变更，请重新开始梳理。');
+    const id=randomUUID(),controller=new AbortController(),job={kind:'history-review',chatId:input.chatId,sourceHash,created:Date.now(),status:'running',controller};jobs.set(id,job);active=id;
+    job.finished=reviewRunner.run(input,{signal:controller.signal,onProgress:progress=>{if(!controller.signal.aborted)job.progress=progress;}}).then(result=>{job.status='completed';job.result=result;}).catch(error=>{job.status=controller.signal.aborted?'cancelled':'failed';job.error=error.code?'Mac 无法保存梳理缓存，请检查磁盘空间；原聊天未修改。':error.message;}).finally(()=>{job.finishedAt=Date.now();if(active===id)active=null;});
+    send(res,202,{jobId:id,status:'running',sourceHash});return;
+   }
    if(url.pathname==='/api/analyze'&&req.method==='POST'){
-    await refreshAuth();if(!ready){send(res,503,{error:'请先在这台 Mac 的 ChatGPT 应用中登录 Codex。'});return;}
-    const input=await body(req);if(stopping)throw Object.assign(new Error('Mac 服务正在关闭。'),{status:503});if(!input||typeof input!=='object')throw new Error('分析请求格式不正确。');contextFor(input.messages,input.targetIndex);
+    const epoch=taskEpoch;await refreshAuth();if(!ready){send(res,503,{error:'请先在这台 Mac 的 ChatGPT 应用中登录 Codex。'});return;}
+    const input=await body(req);if(stopping||clearingBackup||epoch!==taskEpoch)throw Object.assign(new Error('Mac 服务正在关闭。'),{status:503});if(!input||typeof input!=='object')throw new Error('分析请求格式不正确。');contextFor(input.messages,input.targetIndex);
     if(!['warm','honest','brief'].includes(input.tone)||typeof input.note!=='string'||input.note.length>2000||(input.style!==undefined&&(typeof input.style!=='string'||input.style.length>1000)))throw new Error('语气或背景格式不正确。');
     normalizeReplyOptions(input.replyOptions);normalizeContextInfo(input.contextInfo,input.targetIndex+1);
-    for(const [id,job] of jobs)if(Date.now()-job.created>600000)jobs.delete(id);
+    pruneJobs(jobs);
     const id=input.requestId||randomUUID();
     if(typeof id!=='string'||!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');
-    if(jobs.has(id)){const prior=jobs.get(id);if(prior.status==='cancelled'){send(res,409,{error:'这次分析已取消。'});return;}send(res,202,{jobId:id,status:prior.status});return;}
-    if(active){send(res,429,{error:'还有一条消息正在分析，请等它完成或取消后再试。'});return;}
-    const controller=new AbortController(),job={created:Date.now(),status:'running',controller};jobs.set(id,job);active=id;
-    job.finished=analyzeWithCodex(input,{signal:controller.signal}).then(result=>{job.status='completed';job.result=result;}).catch(error=>{job.status='failed';job.error=error.message;}).finally(()=>{if(active===id)active=null;});
+    if(jobs.has(id)){const prior=jobs.get(id);if(prior.kind&&prior.kind!=='analysis')throw new Error('任务编号已被其他任务使用。');if(prior.status==='cancelled'){send(res,409,{error:'这次分析已取消。'});return;}send(res,202,{jobId:id,status:prior.status});return;}
+    if(active){send(res,429,{error:jobs.get(active)?.kind==='history-review'?'Mac 正在梳理整段历史。可在“全量历史梳理”中停止，释放后再起草回复。':'还有一条消息正在分析，请等它完成或取消后再试。'});return;}
+    const controller=new AbortController(),job={kind:'analysis',created:Date.now(),status:'running',controller};jobs.set(id,job);active=id;
+    job.finished=analyzeWithCodex(input,{signal:controller.signal}).then(result=>{job.status='completed';job.result=result;}).catch(error=>{job.status='failed';job.error=error.message;}).finally(()=>{job.finishedAt=Date.now();if(active===id)active=null;});
     send(res,202,{jobId:id,status:'running'});return;
    }
-   if(url.pathname.startsWith('/api/jobs/')){const id=url.pathname.slice(10);if(!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');const job=jobs.get(id);if(req.method==='DELETE'){if(job){job.controller?.abort();await job.finished;job.status='cancelled';delete job.result;}else{jobs.set(id,{created:Date.now(),status:'cancelled'});if(jobs.size>300)jobs.delete(jobs.keys().next().value);}send(res,200,{status:'cancelled'});return;}if(!job){send(res,404,{error:'这次分析已过期，请重新选择消息。'});return;}if(req.method==='GET'){send(res,200,{status:job.status,...(job.result?{result:job.result}:{}),...(job.error?{error:job.error}:{})});return;}}
+   if(url.pathname.startsWith('/api/jobs/')){const id=url.pathname.slice(10);if(!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');const job=jobs.get(id);if(req.method==='DELETE'){if(job){job.controller?.abort();await job.finished;job.status='cancelled';delete job.result;}else{jobs.set(id,{created:Date.now(),status:'cancelled'});pruneJobs(jobs);}send(res,200,{status:'cancelled'});return;}if(!job){send(res,404,{error:'这次分析已过期，请重新选择消息。'});return;}if(req.method==='GET'){send(res,200,{status:job.status,...(job.progress?{progress:job.progress}:{}),...(job.sourceHash?{sourceHash:job.sourceHash}:{}),...(job.result?{result:job.result}:{}),...(job.error?{error:job.error}:{})});return;}}
    if(url.pathname==='/api/ocr'&&req.method==='POST'){
     if(!process.env.XIANWAI_OCR){send(res,503,{error:'本机截图识别尚未准备好。'});return;}
     const input=await body(req,6500000),match=typeof input?.dataUrl==='string'&&input.dataUrl.match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/);

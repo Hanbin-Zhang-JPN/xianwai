@@ -17,7 +17,7 @@ export function startCompanion(api){
  const endpoint=()=>getState().endpoint.replace(/\/$/,'');
  const heartbeat=createConnectionMonitor({current:()=>{const s=getState();return document.hidden||pairTask||!connected||!s.token?null:{endpoint:endpoint()||location.origin,token:s.token};},probe:(pair,signal)=>probeConnection(pair,{attempts:1,signal}),onStatus:status=>{connected=true;aiReady=status.ready;ocrAvailable=!!status.ocr;phase='connected';draw();},onFailure:()=>{phase='offline';draw();}});
  const auth=token=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
- const localWorkspace=()=>{const s=getState();return {schemaVersion:6,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
+ const localWorkspace=()=>{const s=getState();return {schemaVersion:7,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats.filter(c=>!['late','tired','weekend'].includes(c.id)),favorites:s.favorites};};
  const readJSON=async response=>{let result;try{result=await response.json();}catch{throw new Error('无法连接 Mac，请确认弦外应用仍在运行。');}if(!response.ok)throw Object.assign(new Error(result?.error||'请求失败。'),{status:response.status});return result;};
  const query=(pair,path,signal)=>withRequestTimeout(activeSignal=>fetch(pair.endpoint+path,{headers:auth(pair.token),signal:activeSignal}).then(readJSON),signal);
  const applyWorkspace=workspace=>{const s=getState();if(workspace.chats.length){Object.assign(s,workspace);s.composerDrafts=Object.fromEntries(workspace.chats.map(chat=>[chat.id,{...chat.composer}]));s.tone=s.chats.find(chat=>chat.id===s.active)?.preferredTone||'warm';}};
@@ -32,7 +32,7 @@ export function startCompanion(api){
  });}
  function cancelPair(){const old=pairTask;old?.controller.abort();pairTask=null;if(old){heartbeat.invalidate();phase='disconnected';draw();}}
  function cancelOCR(){ocrTask?.controller.abort();ocrTask=null;}
- function disconnect(){heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
+ function disconnect(){window.xianwaiReviewDisconnect?.();heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();analysisClient.clearCache();stopAnalysis();forget();connected=false;ocrAvailable=false;aiReady=false;phase='disconnected';syncError='';pendingPair=null;const s=getState();s.live=false;s.endpoint='';s.token='';if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);}
  function draw(){
   const s=getState(),bench=document.querySelector('.workbench');
   if(bench&&!document.querySelector('.quick-actions')){
@@ -52,7 +52,7 @@ export function startCompanion(api){
  const parsePair=parsePairLink;
  function pairingModal(pair){pendingPair=pair;const hash=new URLSearchParams({key:pair.token});if(pair.endpoint!==location.origin)hash.set('bridge',pair.endpoint);history.replaceState(null,'',location.pathname+location.search+'#'+hash.toString());const local=pair.endpoint.startsWith('http://127.0.0.1');modal('让这台设备连上弦外','连接后，不需要配置模型密钥。分析使用 Mac 上已登录的 Codex 及其额度。',`<div class="notice">${local?'截图在这台 Mac 上识别。':'截图通过 Cloudflare 的 HTTPS 连接发送到你的 Mac，在 Mac 上识别。'}选择“分析”时，相关聊天文字和背景才会通过 Codex 发送给 OpenAI。</div><label class="checkbox-row"><input id="remember-pair" type="checkbox" checked>在这台设备记住 Mac 连接</label><label class="checkbox-row"><input id="remember-chats" type="checkbox" ${getState().persist?'checked':''}>在这台设备与 Mac 保留聊天和收藏（未加密）</label><p class="intro" style="margin-top:14px">重新连接会合并记录；同一对话有不同内容时，会保留两份供你核对。请勿转发配对链接。</p>`,`<button class="outline-btn" data-companion="edit-pair">更换配对链接</button><button class="primary-btn" data-companion="connect">确认连接，开始使用</button>`);}
  async function connect(pair,options={}){
-  const retained=api.captureView?.();heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();if(api.restoreView?.(retained))render();
+  const retained=api.captureView?.();window.xianwaiReviewDisconnect?.();heartbeat.invalidate();cancelPair();cancelOCR();sync.disconnect();void cancelAnalysis();connected=false;ocrAvailable=false;phase='connecting';pendingPair=pair;stopAnalysis();if(api.restoreView?.(retained))render();
   const task={controller:new AbortController(),owner:options.owner};pairTask=task;
   const valid=()=>pairTask===task&&!task.controller.signal.aborted&&(!task.owner||task.owner.isConnected);
   const timeout=setTimeout(()=>task.controller.abort(),30000);
@@ -60,7 +60,7 @@ export function startCompanion(api){
    const status=await probeConnection(pair,{signal:task.controller.signal,onAttempt:(attempt,total)=>{const button=task.owner?.querySelector('[data-companion="connect"]');if(button)button.textContent=`正在验证 Mac（${attempt}/${total}）…`;}});
    if(!task.owner){clearTimeout(timeout);await waitForNoDialog(task.controller.signal);}
    let restored=null,revision=0;
-   if(status.workspaceSchema!==6)throw new Error('请先将 Mac 上的弦外升级到 0.6.0，再使用长期历史语境。');
+   if(status.workspaceSchema!==7)throw new Error('请先将 Mac 上的弦外升级到 0.7.0，再使用长期历史语境。');
    if(options.save){const backup=await query(pair,'/api/workspace',task.controller.signal);if(!Number.isSafeInteger(backup.revision)||backup.revision<0)throw new Error('请更新 Mac 上的弦外应用后重新配对。');if(!task.owner)await waitForNoDialog(task.controller.signal);revision=backup.revision;restored=mergeWorkspaces(backup.workspace,localWorkspace());}
    if(!valid())return;
    const latestView=api.captureView?.(),s=getState();s.endpoint=pair.endpoint===location.origin?'':pair.endpoint;s.token=pair.token;s.live=options.live!==false;s.persist=!!options.save;
@@ -68,7 +68,7 @@ export function startCompanion(api){
    connected=true;ocrAvailable=!!status.ocr;aiReady=status.ready;phase='connected';syncError='';
    if(options.save)sync.connect({...pair,revision});
    rememberPair(pair,options.remember);api.persist();
-   pairTask=null;if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();if(!api.restoreView?.(latestView))api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
+   pairTask=null;void window.xianwaiReviewConnected?.();if(location.hash.includes('key='))history.replaceState(null,'',location.pathname+location.search);if(task.owner)closeModal();if(!api.restoreView?.(latestView))api.restoreProgress();render();toast(!status.ready?'Mac 已连接。请在 Mac 登录 Codex，截图与本地规则可继续使用。':restored?.conflictCopies?'已连接。两边不同的内容均已保留，带“本机副本”的对话请核对。':(s.live?'已连接真实 AI，聊天记录已就绪。':'已连接 Mac，保留本地规则模式。'));
   }catch(error){
    if(pairTask!==task||(task.owner&&!task.owner.isConnected))return;
    phase='offline';draw();
@@ -126,14 +126,14 @@ export function startCompanion(api){
    case'disconnect':disconnect();closeModal();render();toast('已断开 Mac 连接，聊天与收藏仍在当前设备。');break;
   }}catch(error){const node=document.querySelector('#modal-error');if(node)node.textContent=error.message;else toast(error.message);}
  });
- window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:6,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
+ window.xianwaiPersistWorkspace=s=>{if(connected&&s.persist)try{sync.schedule({schemaVersion:7,folders:s.folders,deletedFavoriteIds:s.deletedFavoriteIds,activeUpdatedAt:s.activeUpdatedAt,active:s.active,chats:s.chats,favorites:s.favorites});}catch(error){toast(error.message);}};
  window.xianwaiDeleteBackup=async()=>{if(!connected){let remembered=false;remembered=!!(safeStorage.read('localStorage','xianwai-connection-v1')||safeStorage.read('sessionStorage','xianwai-connection-v1'));if(remembered||getState().token)throw new Error('请先重新连接 Mac，再清除 Mac 备份。当前设备的记录未改动。');return;}if(!getState().persist){const pair={endpoint:endpoint(),token:getState().token},backup=await query(pair,'/api/workspace',AbortSignal.timeout(12000));sync.connect({...pair,revision:backup.revision});}await sync.clear();analysisClient.clearCache();};
  window.xianwaiSettingsSaved=()=>{if(connected){let permanent=false;permanent=!!safeStorage.read('localStorage','xianwai-connection-v1');rememberPair({endpoint:endpoint()||location.origin,token:getState().token},permanent);}};
  window.xianwaiBeforeSettings=async(candidate,signal)=>{
   const s=getState();
   if(candidate.endpoint!==s.endpoint||candidate.token!==s.token){disconnect();return;}
   if(!candidate.persist){sync.disconnect();return;}
-  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==6)throw new Error('请先将 Mac 弦外升级到 0.6.0，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
+  if(connected&&!s.persist){const health=await query({endpoint:endpoint(),token:s.token},'/api/health',signal);if(health.workspaceSchema!==7)throw new Error('请先将 Mac 弦外升级到 0.7.0，再保存联系人资料库。');const pair={endpoint:endpoint(),token:s.token},backup=await query(pair,'/api/workspace',signal);if(signal.aborted)return;const restored=mergeWorkspaces(backup.workspace,localWorkspace());sync.connect({...pair,revision:backup.revision});applyWorkspace(restored.workspace);}
  };
  const observer=new MutationObserver(()=>{const box=document.querySelector('#endpoint');if(connected&&box&&!document.querySelector('[data-companion="disconnect"]')){const b=document.createElement('button');b.className='outline-btn';b.dataset.companion='disconnect';b.textContent='断开这台设备与 Mac 的连接';box.parentElement.append(b);}});observer.observe(document.querySelector('#modal-root'),{childList:true,subtree:true});
  const hash=new URLSearchParams(location.hash.slice(1));

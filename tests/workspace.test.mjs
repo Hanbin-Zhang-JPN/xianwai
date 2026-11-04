@@ -7,7 +7,7 @@ import {normalizeWorkspace,mergeWorkspaces} from '../dist/workspace.js';
 import {WorkspaceStore} from '../lib/workspace-store.mjs';
 import {createWorkspaceSync} from '../dist/workspace-sync.js';
 
-const workspace=text=>({schemaVersion:6,active:'one',chats:[{id:'one',title:'测试',name:'对方',note:'',messages:[{role:'partner',text}]}],favorites:[]});
+const workspace=text=>({schemaVersion:7,active:'one',chats:[{id:'one',title:'测试',name:'对方',note:'',messages:[{role:'partner',text}]}],favorites:[]});
 const tick=()=>new Promise(r=>setTimeout(r,15));
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status});
 test('re-pairing preserves both differing conversations and rejects destructive truncation',()=>{

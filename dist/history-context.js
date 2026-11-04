@@ -18,7 +18,7 @@ export function setContextPin(chat,messageId,active,now=Date.now()){
  chat.contextPins=normalizeContextPins([...(chat.contextPins||[]).filter(item=>item.messageId!==messageId),next]);chat.updatedAt=Math.max(now,(chat.updatedAt||0)+1);
 }
 export function mergeContextPins(remote=[],local=[]){const pins=new Map();for(const item of [...remote,...local]){const prior=pins.get(item.messageId);if(!prior||item.updatedAt>prior.updatedAt||(item.updatedAt===prior.updatedAt&&!item.active))pins.set(item.messageId,item);}return normalizeContextPins([...pins.values()]);}
-export function buildHistoryContext(messages,index,{pins=[]}={}){
+export function buildHistoryContext(messages,index,{pins=[],priorityIds=[]}={}){
  if(!Number.isInteger(index)||index<0||index>=messages.length)throw new Error('请选择一条有效的消息。');
  const count=index+1,selected=new Set();let chars=0,recentStart=index;
  const add=i=>{if(i<0||i>index||selected.has(i))return false;const size=messages[i].text.length;if(selected.size>=300||chars+size>80000)return false;selected.add(i);chars+=size;return true;};
@@ -29,6 +29,7 @@ export function buildHistoryContext(messages,index,{pins=[]}={}){
   let recentChars=0;for(let i=index;i>=0&&index-i<80;i--){if(recentChars+messages[i].text.length>40000)break;add(i);recentChars+=messages[i].text.length;recentStart=i;}
   const pinnedIds=new Set(pins.filter(item=>item.active).map(item=>item.messageId)),pinned=[];
   for(let i=0;i<recentStart;i++)if(pinnedIds.has(messages[i].id)){add(i);pinned.push(i);}
+  const priority=new Set(priorityIds);for(let i=0;i<recentStart;i++)if(priority.has(messages[i].id))add(i);
   for(const i of pinned)for(const offset of [-1,1])add(i+offset);
   const primary=terms(messages[index].text),query=new Set(primary);for(let i=Math.max(recentStart,index-5);i<index;i++)for(const term of terms(messages[i].text))if(query.size<200)query.add(term);
   const matches=[],frequencies=new Map();

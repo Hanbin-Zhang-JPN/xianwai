@@ -2,7 +2,7 @@ import {mkdir,readFile,writeFile,copyFile} from 'node:fs/promises';
 const root=new URL('../',import.meta.url),out=new URL('ios/Xianwai/Resources/Web/',root);
 await mkdir(out,{recursive:true});
 // Bundle a classic script: file:// WKWebView pages cannot rely on browser ES-module loading.
-const modules=['reply-options','history-context','message-gesture','file-import','connection-monitor','core','flow','analysis-client','library','analysis-view','workspace','workspace-sync','pairing','preferences','clipboard','companion','library-ui','long-history-ui','app'];
+const modules=['reply-options','history-context','relationship-review','message-gesture','file-import','connection-monitor','core','flow','analysis-client','library','analysis-view','workspace','workspace-sync','pairing','preferences','clipboard','companion','library-ui','history-review-client','relationship-review-ui','long-history-ui','app'];
 const bundled=[];
 for(const name of modules)bundled.push((await readFile(new URL('dist/'+name+'.js',root),'utf8')).replace(/^import .*?;\n/gm,'').replace(/^export /gm,''));
 await writeFile(new URL('app.js',out),'(()=>{\n'+bundled.join('\n')+'\n})();\n');

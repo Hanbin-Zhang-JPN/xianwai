@@ -1,9 +1,10 @@
+import {normalizeRelationshipContext} from './relationship-review.js';
 import {normalizeContextInfo} from './history-context.js';
 import {contextFor} from './core.js';
 import {normalizeRecommendation} from './reply-options.js';
 const aborted=()=>new DOMException('已取消分析','AbortError');
 export function validateClientAnalysis(value,input){
- const context=contextFor(input.messages,input.targetIndex),count=context.length;normalizeContextInfo(input.contextInfo,count);
+ const context=contextFor(input.messages,input.targetIndex),count=context.length;const info=normalizeContextInfo(input.contextInfo,count),relation=normalizeRelationshipContext(input.relationshipContext,count);if(relation&&(!info||relation.sourceCount>info.availableCount))throw new Error('关系档案超出了目标消息的历史范围。');
  const validText=(text,max=2000)=>typeof text==='string'&&!!text.trim()&&text.length<=max;
  const validEvidence=ids=>Array.isArray(ids)&&ids.length>0&&ids.length<=6&&ids.every(id=>Number.isInteger(id)&&id>=1&&id<=count);
  if(!value||value.mode!=='ai'||value.contextCount!==count||!['title','feeling','need','question','avoid'].every(key=>validText(value[key]))||!Array.isArray(value.replies)||value.replies.length!==3||!Array.isArray(value.facts)||!value.facts.length||!Array.isArray(value.hypotheses)||value.hypotheses.length<2||value.hypotheses.length>3)throw new Error('分析结果格式不正确，请重试。');

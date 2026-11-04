@@ -6,7 +6,7 @@ const bounded=(value,max,name,fallback)=>{
  return value;
 };
 export function normalizeWorkspace(value){
- if(value?.schemaVersion!==undefined&&![1,2,3,4,5,6].includes(value.schemaVersion))throw new Error('资料库版本较新或格式不正确，请更新应用，已停止覆盖。');
+ if(value?.schemaVersion!==undefined&&![1,2,3,4,5,6,7].includes(value.schemaVersion))throw new Error('资料库版本较新或格式不正确，请更新应用，已停止覆盖。');
  if(!value||!Array.isArray(value.chats)||value.chats.length>15||!Array.isArray(value.favorites)||value.favorites.length>300)throw new Error('聊天备份格式或数量不正确，已停止覆盖。');
  const folders=normalizeFolders(value.folders),activeFolders=new Set(folders.filter(folder=>!folder.deleted).map(folder=>folder.id));
  const deletedFavoriteIds=value.deletedFavoriteIds||[];if(!Array.isArray(deletedFavoriteIds)||deletedFavoriteIds.length>1000||deletedFavoriteIds.some(id=>typeof id!=='string'||!id||id.length>100))throw new Error('收藏删除记录格式或数量不正确。');
@@ -24,7 +24,7 @@ export function normalizeWorkspace(value){
   return {id,text:bounded(item.text,2000,'收藏文字'),label:bounded(item.label,100,'收藏语气',''),name:bounded(item.name,100,'收藏称呼',''),source:bounded(item.source,100,'收藏来源','')};
  });
  const activeUpdatedAt=value.activeUpdatedAt??0;if(!Number.isSafeInteger(activeUpdatedAt)||activeUpdatedAt<0)throw new Error('联系人进度时间不正确。');
- const workspace={schemaVersion:6,active:ids.has(value.active)?value.active:chats[0]?.id||null,activeUpdatedAt,chats,favorites,folders,deletedFavoriteIds:deletedFavorites};
+ const workspace={schemaVersion:7,active:ids.has(value.active)?value.active:chats[0]?.id||null,activeUpdatedAt,chats,favorites,folders,deletedFavoriteIds:deletedFavorites};
  if(new TextEncoder().encode(JSON.stringify(workspace)).length>LIBRARY_LIMITS.bytes)throw new Error('资料库已超过 32 MB，请先导出并整理分析记录，原数据未被覆盖。');return workspace;
 }
 
@@ -62,5 +62,5 @@ export function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={})
  for(const id of deletedFavoriteIds)favorites.delete(id);
  if(chats.size>15||favorites.size>300)throw new Error('两边的记录超过容量，已停止自动合并。可取消“保留聊天”后连接，先导出需要的内容。');
  if(mac.activeUpdatedAt>device.activeUpdatedAt)active=mac.active;
- return {workspace:normalizeWorkspace({schemaVersion:6,folders:[...folders.values()],deletedFavoriteIds,activeUpdatedAt:Math.max(mac.activeUpdatedAt,device.activeUpdatedAt),active:active||mac.active,chats:[...chats.values()],favorites:[...favorites.values()]}),conflictCopies:copies};
+ return {workspace:normalizeWorkspace({schemaVersion:7,folders:[...folders.values()],deletedFavoriteIds,activeUpdatedAt:Math.max(mac.activeUpdatedAt,device.activeUpdatedAt),active:active||mac.active,chats:[...chats.values()],favorites:[...favorites.values()]}),conflictCopies:copies};
 }

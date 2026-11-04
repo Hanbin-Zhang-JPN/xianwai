@@ -1,3 +1,4 @@
+import {normalizeHistoryReview,reviewEvidenceIds,normalizeRelationshipContext} from './relationship-review.js';
 import {HISTORY_LIMITS,normalizeContextInfo,normalizeContextPins,mergeContextPins} from './history-context.js';
 import {validateMessages,IMPORT_LIMITS} from './core.js';
 import {combineScreenshotBatches,boundaryOverlap} from './flow.js';
@@ -17,7 +18,7 @@ export function normalizeContactMessages(rows,{archive=false}={}){
  const messages=rows.map((row,index)=>{
   if(!row||!['me','partner'].includes(row.role)||typeof row.text!=='string'||!row.text.trim()||row.text.trim().length>2000)throw new Error(`第 ${index+1} 条消息格式不正确。`);
   const text=row.text.trim(),id=row.id===undefined?legacyMessageId({...row,text},index):libraryId(row.id);if(ids.has(id))throw new Error('消息编号重复，请重新导入。');ids.add(id);total+=text.length;
-  return {id,role:row.role,text,createdAt:libraryTime(row.createdAt),...(row.sentAt?{sentAt:libraryTime(row.sentAt)}:{})};
+  return {id,role:row.role,text,createdAt:libraryTime(row.createdAt),...(row.sentAt!==undefined&&row.sentAt!==0?{sentAt:libraryTime(row.sentAt)}:{})};
  });
  if(total>LIBRARY_LIMITS.total)throw new Error('这位联系人的上下文已超过 200 万字，请先导出并整理。');return messages;
 }
@@ -43,6 +44,7 @@ export function normalizeContactMemory(chat){
  if(messages.some(message=>removedSet.has(message.id)))throw new Error('当前前文包含已移除的消息，已停止覆盖。');
  for(const message of archive){const prior=pool.get(message.id);if(prior&&(prior.role!==message.role||prior.text!==message.text||(prior.sentAt||0)!==(message.sentAt||0)))throw new Error('历史消息与当前消息的编号冲突。');pool.set(message.id,message);}
  if(pool.size>LIBRARY_LIMITS.pool||[...pool.values()].reduce((sum,message)=>sum+message.text.length,0)>LIBRARY_LIMITS.total)throw new Error('联系人历史原文容量已满，请导出后整理分析记录。');
+ const relationshipReview=normalizeHistoryReview(chat.relationshipReview,pool);
  const deletedAnalysisIds=chat.deletedAnalysisIds||[];if(!Array.isArray(deletedAnalysisIds)||deletedAnalysisIds.length>1000)throw new Error('分析删除记录格式不正确。');const deleted=[...new Set(deletedAnalysisIds.map(libraryId))];
  const ids=new Set(),source=chat.analyses||[];if(!Array.isArray(source)||source.length>LIBRARY_LIMITS.records)throw new Error('每位联系人最多保留 100 条分析记录，请先导出或删除部分记录。');
  const analyses=source.filter(record=>!deleted.includes(record?.id)).map(record=>{
@@ -51,11 +53,12 @@ export function normalizeContactMemory(chat){
   const contextIds=record.contextIds.map(libraryId),context=contextIds.map(id=>pool.get(id));if(context.some(message=>!message))throw new Error('分析记录引用的原文缺失，已停止覆盖。');
   const targetId=libraryId(record.targetId);if(contextIds.at(-1)!==targetId)throw new Error('分析目标与保存的前文不一致。');
   const contextInfo=normalizeContextInfo(record.contextInfo,context.length);if(contextInfo&&contextInfo.sentAt.some((time,index)=>time!==(context[index].sentAt||0)))throw new Error('分析记录的发言时间与原文不一致。');
+  const relationshipContext=normalizeRelationshipContext(record.relationshipContext,context.length);if(relationshipContext&&(!contextInfo||relationshipContext.sourceCount>contextInfo.availableCount))throw new Error('关系背景来自目标之后的历史，已停止覆盖。');
   const result=structuredClone(record.result);if(!result||!['ai','local'].includes(result.mode))throw new Error('分析类型不正确。');validateClientAnalysis({...result,mode:'ai'},{messages:context,targetIndex:context.length-1});
   const drafts={};for(const tone of ['warm','honest','brief'])if(record.drafts?.[tone]!==undefined)drafts[tone]=libraryText(record.drafts[tone],2000);
-  return {id,createdAt:libraryTime(record.createdAt),updatedAt:libraryTime(record.updatedAt??record.createdAt),targetId,contextIds,contextInfo,result,tone:['warm','honest','brief'].includes(record.tone)?record.tone:'warm',drafts,note:libraryText(record.note,2000),style:libraryText(record.style,1000),replyOptions:normalizeReplyOptions(record.replyOptions)};
+  return {id,createdAt:libraryTime(record.createdAt),updatedAt:libraryTime(record.updatedAt??record.createdAt),targetId,contextIds,contextInfo,relationshipContext,result,tone:['warm','honest','brief'].includes(record.tone)?record.tone:'warm',drafts,note:libraryText(record.note,2000),style:libraryText(record.style,1000),replyOptions:normalizeReplyOptions(record.replyOptions)};
  }).sort((a,b)=>b.createdAt-a.createdAt||a.id.localeCompare(b.id));
- return {conflictOf:chat.conflictOf==null?null:libraryId(chat.conflictOf),messages,contextPins,removedMessageIds,archive:archive.filter(message=>!currentIds.has(message.id)),analyses,deletedAnalysisIds:deleted,resumeId:ids.has(chat.resumeId)?chat.resumeId:null,resumeUpdatedAt:libraryTime(chat.resumeUpdatedAt),updatedAt:libraryTime(chat.updatedAt),profileUpdatedAt:libraryTime(chat.profileUpdatedAt),preferredToneUpdatedAt:libraryTime(chat.preferredToneUpdatedAt),composerUpdatedAt:libraryTime(chat.composerUpdatedAt??chat.updatedAt),folderId:chat.folderId==null?null:libraryId(chat.folderId),folderUpdatedAt:libraryTime(chat.folderUpdatedAt),composer:{text:libraryText(chat.composer?.text,2000),role:chat.composer?.role==='me'?'me':'partner'}};
+ return {conflictOf:chat.conflictOf==null?null:libraryId(chat.conflictOf),messages,contextPins,relationshipReview,reviewUpdatedAt:libraryTime(chat.reviewUpdatedAt),removedMessageIds,archive:archive.filter(message=>!currentIds.has(message.id)),analyses,deletedAnalysisIds:deleted,resumeId:ids.has(chat.resumeId)?chat.resumeId:null,resumeUpdatedAt:libraryTime(chat.resumeUpdatedAt),updatedAt:libraryTime(chat.updatedAt),profileUpdatedAt:libraryTime(chat.profileUpdatedAt),preferredToneUpdatedAt:libraryTime(chat.preferredToneUpdatedAt),composerUpdatedAt:libraryTime(chat.composerUpdatedAt??chat.updatedAt),folderId:chat.folderId==null?null:libraryId(chat.folderId),folderUpdatedAt:libraryTime(chat.folderUpdatedAt),composer:{text:libraryText(chat.composer?.text,2000),role:chat.composer?.role==='me'?'me':'partner'}};
 }
 function normalizeRemovedMessages(value=[]){
  if(!Array.isArray(value))throw new Error('消息整理记录格式不正确。');
@@ -85,7 +88,7 @@ export function prepareContactImport(existing,rows,{append=true,removeOverlap=tr
  return {messages:normalizeContactMessages([...(append?existing:[]),...incoming]),removed:removeOverlap?overlap:0,screenshotOverlap:combined.overlapCount,totalOverlap:overlap+combined.overlapCount};
 }
 export function replaceContactMessages(chat,messages,now=Date.now()){
- const next=normalizeContactMessages(messages),pool=contactMessagePool(chat,{messages:next}),needed=new Set((chat.analyses||[]).flatMap(record=>record.contextIds)),currentIds=new Set(next.map(message=>message.id));
+ const next=normalizeContactMessages(messages),pool=contactMessagePool(chat,{messages:next}),needed=new Set([...(chat.analyses||[]).flatMap(record=>record.contextIds),...reviewEvidenceIds(chat.relationshipReview)]),currentIds=new Set(next.map(message=>message.id));
  const archive=[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id));
  const removedMessageIds=normalizeRemovedMessages([...(chat.removedMessageIds||[]),...chat.messages.filter(message=>!currentIds.has(message.id)).map(message=>message.id)]);
  const contextPins=(chat.contextPins||[]).map(pin=>pin.active&&!currentIds.has(pin.messageId)?{...pin,active:false,updatedAt:Math.max(now,pin.updatedAt+1)}:pin);
@@ -101,11 +104,11 @@ export function contactMessagePool(...chats){
 }
 export function recordContext(chat,record){const pool=new Map([...(chat.archive||[]),...chat.messages].map(message=>[message.id,message]));return record.contextIds.map(id=>pool.get(id));}
 export function saveAnalysisRecord(chat,context,result,{tone='warm',now=Date.now(),newId=()=>crypto.randomUUID(),replyOptions,note=chat.note||'',style=chat.style||''}={}){
- const options=normalizeReplyOptions(replyOptions),contextInfo=normalizeContextInfo(context.info,context.messages.length),key=libraryCanonical([context.messages.map(message=>message.id),result,note,style,options,contextInfo]);
- let record=(chat.analyses||[]).find(record=>libraryCanonical([record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null])===key);
+ const options=normalizeReplyOptions(replyOptions),contextInfo=normalizeContextInfo(context.info,context.messages.length),relationshipContext=normalizeRelationshipContext(context.relationshipContext,context.messages.length),key=libraryCanonical([context.messages.map(message=>message.id),result,note,style,options,contextInfo,relationshipContext]);
+ let record=(chat.analyses||[]).find(record=>libraryCanonical([record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null,record.relationshipContext||null])===key);
  if(!record){
   if((chat.analyses||[]).length>=LIBRARY_LIMITS.records)throw new Error('这位联系人的分析记录已满 100 条。请先导出或删除部分记录。');
-  record={id:newId(),createdAt:now,updatedAt:now,targetId:context.messages.at(-1).id,contextIds:context.messages.map(message=>message.id),contextInfo,result:structuredClone(result),tone,drafts:{},note,style,replyOptions:options};
+  record={id:newId(),createdAt:now,updatedAt:now,targetId:context.messages.at(-1).id,contextIds:context.messages.map(message=>message.id),contextInfo,relationshipContext,result:structuredClone(result),tone,drafts:{},note,style,replyOptions:options};
   if((chat.analyses||[]).some(prior=>prior.id===record.id)||(chat.deletedAnalysisIds||[]).includes(record.id))throw new Error('分析编号重复，请重试。');
   const memory=normalizeContactMemory({...chat,analyses:[record,...(chat.analyses||[])],resumeId:record.id,resumeUpdatedAt:now,updatedAt:Math.max(now,(chat.updatedAt||0)+1)});
   Object.assign(chat,memory);return chat.analyses.find(saved=>saved.id===record.id);
@@ -135,7 +138,7 @@ export function setContactProfile(chat,profile,now=Date.now()){
 }
 export function deleteAnalysisRecord(chat,id,now=Date.now()){
  if(!(chat.analyses||[]).some(record=>record.id===id))return;
- const deletedAnalysisIds=[...new Set([...(chat.deletedAnalysisIds||[]),id])],analyses=chat.analyses.filter(record=>record.id!==id),needed=new Set(analyses.flatMap(record=>record.contextIds));
+ const deletedAnalysisIds=[...new Set([...(chat.deletedAnalysisIds||[]),id])],analyses=chat.analyses.filter(record=>record.id!==id),needed=new Set([...analyses.flatMap(record=>record.contextIds),...reviewEvidenceIds(chat.relationshipReview)]);
  const memory=normalizeContactMemory({...chat,deletedAnalysisIds,analyses,archive:(chat.archive||[]).filter(message=>needed.has(message.id)),resumeId:chat.resumeId===id?null:chat.resumeId,updatedAt:Math.max(now,(chat.updatedAt||0)+1)});Object.assign(chat,memory);
 }
 export function moveContact(chat,folderId,now=Date.now()){const id=folderId?libraryId(folderId):null;if(chat.folderId===id)return;chat.folderId=id;chat.folderUpdatedAt=Math.max(now,(chat.folderUpdatedAt||0)+1);touchContact(chat,now);}
@@ -143,8 +146,8 @@ export function mergeContactMemory(remote,local,messages){
  const {removedMessageIds}=currentMessageCandidates(remote,local);
  const removed=new Set(removedMessageIds);messages=messages.filter(message=>!removed.has(message.id));
  const deletedAnalysisIds=[...new Set([...(remote.deletedAnalysisIds||[]),...(local.deletedAnalysisIds||[])])],records=new Map();
- const identity=record=>libraryCanonical([record.createdAt,record.targetId,record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null]);
+ const identity=record=>libraryCanonical([record.createdAt,record.targetId,record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null,record.relationshipContext||null]);
  for(const record of [...remote.analyses,...local.analyses])if(!deletedAnalysisIds.includes(record.id)){const prior=records.get(record.id);if(prior&&identity(prior)!==identity(record))throw new Error('同一分析编号对应不同原文或结果，已停止合并。请先导出两边的资料库。');if(!prior||record.updatedAt>prior.updatedAt)records.set(record.id,record);}
- const pool=contactMessagePool(remote,local),needed=new Set([...records.values()].flatMap(record=>record.contextIds)),currentIds=new Set(messages.map(message=>message.id)),folder=(local.folderUpdatedAt>=remote.folderUpdatedAt?local:remote),resume=(local.resumeUpdatedAt>=remote.resumeUpdatedAt?local:remote),composer=(local.composerUpdatedAt>=remote.composerUpdatedAt?local:remote),tone=(local.preferredToneUpdatedAt>=remote.preferredToneUpdatedAt?local:remote),profile=(local.profileUpdatedAt>remote.profileUpdatedAt?local:remote);
- return {...remote,title:profile.title,name:profile.name,note:profile.note,style:profile.style,profileUpdatedAt:profile.profileUpdatedAt,preferredTone:tone.preferredTone,preferredToneUpdatedAt:tone.preferredToneUpdatedAt,messages,contextPins:mergeContextPins(remote.contextPins,local.contextPins),removedMessageIds,archive:[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id)),analyses:[...records.values()],deletedAnalysisIds,resumeId:resume.resumeId,resumeUpdatedAt:resume.resumeUpdatedAt,updatedAt:Math.max(local.updatedAt,remote.updatedAt),folderId:folder.folderId,folderUpdatedAt:folder.folderUpdatedAt,composer:composer.composer,composerUpdatedAt:composer.composerUpdatedAt};
+ const review=(local.reviewUpdatedAt>=remote.reviewUpdatedAt?local:remote),pool=contactMessagePool(remote,local),needed=new Set([...[...records.values()].flatMap(record=>record.contextIds),...reviewEvidenceIds(review.relationshipReview)]),currentIds=new Set(messages.map(message=>message.id)),folder=(local.folderUpdatedAt>=remote.folderUpdatedAt?local:remote),resume=(local.resumeUpdatedAt>=remote.resumeUpdatedAt?local:remote),composer=(local.composerUpdatedAt>=remote.composerUpdatedAt?local:remote),tone=(local.preferredToneUpdatedAt>=remote.preferredToneUpdatedAt?local:remote),profile=(local.profileUpdatedAt>remote.profileUpdatedAt?local:remote);
+ return {...remote,title:profile.title,name:profile.name,note:profile.note,style:profile.style,profileUpdatedAt:profile.profileUpdatedAt,preferredTone:tone.preferredTone,preferredToneUpdatedAt:tone.preferredToneUpdatedAt,messages,relationshipReview:review.relationshipReview||null,reviewUpdatedAt:review.reviewUpdatedAt||0,contextPins:mergeContextPins(remote.contextPins,local.contextPins),removedMessageIds,archive:[...pool.values()].filter(message=>needed.has(message.id)&&!currentIds.has(message.id)),analyses:[...records.values()],deletedAnalysisIds,resumeId:resume.resumeId,resumeUpdatedAt:resume.resumeUpdatedAt,updatedAt:Math.max(local.updatedAt,remote.updatedAt),folderId:folder.folderId,folderUpdatedAt:folder.folderUpdatedAt,composer:composer.composer,composerUpdatedAt:composer.composerUpdatedAt};
 }
