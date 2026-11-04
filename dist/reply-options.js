@@ -10,4 +10,9 @@ export function normalizeRecommendation(value){
  if(!value||!['reply','pause'].includes(value.action??'reply')||!['warm','honest','brief'].includes(value.tone)||typeof value.reason!=='string'||!value.reason.trim()||value.reason.length>250||typeof value.check!=='string'||value.check.length>250)throw new Error('推荐回复的理由或使用条件不正确。');
  return {action:value.action??'reply',tone:value.tone,reason:value.reason.trim(),check:value.check.trim()};
 }
-export function needsReplyDetails(text){return /【待补充[:：][^】]*】/.test(String(text));}
+export function needsReplyDetails(text){return /【\s*待补充|待补充\s*[:：】]/.test(String(text));}
+export function replyCopyProblem(text){
+ if(typeof text!=='string'||!text.trim())return '先写好回复草稿，再复制。';
+ if(needsReplyDetails(text))return '请先把“待补充”替换成你的实际信息，再复制。';
+ return '';
+}
