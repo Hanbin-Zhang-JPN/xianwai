@@ -632,14 +632,14 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
   if(!prior){chats.set(chat.id,chat);continue;}
   if(JSON.stringify(prior)===JSON.stringify(chat))continue;
   const sameProfile=['title','name','note','style','subtitle'].every(key=>prior[key]===chat[key]);
-  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text);
+  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text&&(message.sentAt||0)===(longer[index].sentAt||0));
   const knownProfileEdit=prior.profileUpdatedAt!==chat.profileUpdatedAt&&(prior.profileUpdatedAt>0||chat.profileUpdatedAt>0);
   const candidates=currentMessageCandidates(prior,chat);
   if((sameProfile||knownProfileEdit)&&(prefix(candidates.remote,candidates.local)||prefix(candidates.local,candidates.remote))){
    chats.set(chat.id,mergeContactMemory(prior,chat,candidates.remote.length>=candidates.local.length?candidates.remote:candidates.local));continue;
   }
   const copyTitle=chat.title.slice(0,24)+'（本机副本）';
-  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||(!copy.conflictOf&&copy.title===copyTitle))&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text})=>({role,text})))===JSON.stringify(chat.messages.map(({role,text})=>({role,text}))));
+  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||(!copy.conflictOf&&copy.title===copyTitle))&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text,sentAt})=>({role,text,sentAt:sentAt||0})))===JSON.stringify(chat.messages.map(({role,text,sentAt})=>({role,text,sentAt:sentAt||0}))));
   if(priorCopy){chats.set(priorCopy.id,{...mergeContactMemory(priorCopy,chat,priorCopy.messages),id:priorCopy.id,title:priorCopy.title});if(active===chat.id)active=priorCopy.id;continue;}
 
   const copy={...chat,id:newId(),conflictOf:chat.id,title:chat.title.slice(0,24)+'（本机副本）'};if(chats.has(copy.id))throw new Error('生成对话编号失败，请重试。');chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
@@ -647,7 +647,12 @@ function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={}){
  for(const item of device.favorites){
   const prior=favorites.get(item.id);
   if(!prior)favorites.set(item.id,item);
-  else if(JSON.stringify(prior)!==JSON.stringify(item)){const copy={...item,id:newId(),label:item.label.slice(0,94)+'（本机副本）'};favorites.set(copy.id,copy);copies++;}
+  else if(JSON.stringify(prior)!==JSON.stringify(item)){
+   const label=item.label.slice(0,94)+'（本机副本）';
+   if([...favorites.values()].some(copy=>copy.id!==item.id&&copy.label===label&&['text','name','source'].every(key=>copy[key]===item[key])))continue;
+   const id=newId();if(favorites.has(id)||deletedFavoriteIds.includes(id))throw new Error('生成收藏编号失败，请重试。');
+   favorites.set(id,{...item,id,label});copies++;
+  }
  }
  for(const id of deletedFavoriteIds)favorites.delete(id);
  if(chats.size>15||favorites.size>300)throw new Error('两边的记录超过容量，已停止自动合并。可取消“保留聊天”后连接，先导出需要的内容。');
@@ -984,10 +989,10 @@ function normalizeReviewJob(value){
  return value;
 }
 function createHistoryReviewClient({fetcher=(...args)=>fetch(...args),getPair,onUpdate=()=>{},onComplete=()=>{},onError=()=>{},interval=1200}={}){
- let active=null,known=null;
+ let active=null,known=null,epoch=0;
  const same=(a,b)=>a?.endpoint===b?.endpoint&&a?.token===b?.token;
  const valid=task=>active===task&&!task.controller.signal.aborted&&same(task.pair,getPair());
- function disconnect(){active?.controller.abort();active=null;known=null;}
+ function disconnect(){epoch++;active?.controller.abort();active=null;known=null;}
  function begin(pair){disconnect();const task={pair:{...pair},controller:new AbortController()};active=task;return task;}
  async function call(pair,path,options={},signal){return withRequestTimeout(async live=>{const response=await fetcher(pair.endpoint+path,{...options,headers:{'Content-Type':'application/json',Authorization:'Bearer '+pair.token},signal:live});let value;try{value=await response.json();}catch{throw new Error('Mac 梳理服务返回异常，请重新连接。');}if(!response.ok)throw Object.assign(new Error(value.error||'梳理暂未完成，请重试。'),{status:response.status});return normalizeReviewJob(value);},signal);}
  const sleep=signal=>new Promise((resolve,reject)=>{const done=()=>{signal.removeEventListener('abort',abort);resolve();},timer=setTimeout(done,interval),abort=()=>{clearTimeout(timer);reject(new DOMException('cancelled','AbortError'));};if(signal.aborted)abort();else signal.addEventListener('abort',abort,{once:true});});
@@ -1002,7 +1007,7 @@ function createHistoryReviewClient({fetcher=(...args)=>fetch(...args),getPair,on
  }
  async function start(pair,input){const task=begin(pair);task.chatId=input.chatId;try{const value=await call(pair,'/api/history-review',{method:'POST',body:JSON.stringify(input)},task.controller.signal);if(!valid(task))return false;if(typeof value.jobId!=='string')throw new Error('梳理任务编号不正确。');task.jobId=value.jobId;known={...value,chatId:task.chatId,pair:task.pair};onUpdate({...value,chatId:task.chatId});void follow(task,{...await call(pair,'/api/jobs/'+encodeURIComponent(task.jobId),{},task.controller.signal),jobId:task.jobId,chatId:task.chatId});return true;}catch(error){if(valid(task)){active=null;onError(error);}return false;}}
  async function resume(pair){const task=begin(pair);try{const value=await call(pair,'/api/history-review',{},task.controller.signal);if(!valid(task))return;if(value.status==='none'){onUpdate(value);active=null;return;}if(typeof value.jobId!=='string'||typeof value.chatId!=='string')throw new Error('梳理任务来源不正确。');task.jobId=value.jobId;task.chatId=value.chatId;void follow(task,value);}catch(error){if(valid(task)){active=null;onError(error);}}}
- async function cancel(){const task=known;if(!task||!same(task.pair,getPair()))return false;const result=await call(task.pair,'/api/jobs/'+encodeURIComponent(task.jobId),{method:'DELETE'});if(!same(task.pair,getPair()))return false;disconnect();onUpdate({...result,chatId:task.chatId,jobId:task.jobId});return true;}
+ async function cancel(){const task=known,version=epoch;if(!task||!same(task.pair,getPair()))return false;const current=()=>version===epoch&&same(task.pair,getPair());let result;try{result=await call(task.pair,'/api/jobs/'+encodeURIComponent(task.jobId),{method:'DELETE'});}catch(error){if(!current())return false;throw error;}if(!current())return false;disconnect();onUpdate({...result,chatId:task.chatId,jobId:task.jobId});return true;}
  return {start,resume,cancel,disconnect};
 }
 

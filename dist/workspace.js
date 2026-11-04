@@ -42,14 +42,14 @@ export function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={})
   if(!prior){chats.set(chat.id,chat);continue;}
   if(JSON.stringify(prior)===JSON.stringify(chat))continue;
   const sameProfile=['title','name','note','style','subtitle'].every(key=>prior[key]===chat[key]);
-  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text);
+  const prefix=(shorter,longer)=>shorter.length<=longer.length&&shorter.every((message,index)=>message.role===longer[index].role&&message.text===longer[index].text&&(message.sentAt||0)===(longer[index].sentAt||0));
   const knownProfileEdit=prior.profileUpdatedAt!==chat.profileUpdatedAt&&(prior.profileUpdatedAt>0||chat.profileUpdatedAt>0);
   const candidates=currentMessageCandidates(prior,chat);
   if((sameProfile||knownProfileEdit)&&(prefix(candidates.remote,candidates.local)||prefix(candidates.local,candidates.remote))){
    chats.set(chat.id,mergeContactMemory(prior,chat,candidates.remote.length>=candidates.local.length?candidates.remote:candidates.local));continue;
   }
   const copyTitle=chat.title.slice(0,24)+'（本机副本）';
-  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||(!copy.conflictOf&&copy.title===copyTitle))&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text})=>({role,text})))===JSON.stringify(chat.messages.map(({role,text})=>({role,text}))));
+  const priorCopy=[...chats.values()].find(copy=>copy.id!==chat.id&&(copy.conflictOf===chat.id||(!copy.conflictOf&&copy.title===copyTitle))&&['name','note','style','subtitle'].every(key=>copy[key]===chat[key])&&JSON.stringify(copy.messages.map(({role,text,sentAt})=>({role,text,sentAt:sentAt||0})))===JSON.stringify(chat.messages.map(({role,text,sentAt})=>({role,text,sentAt:sentAt||0}))));
   if(priorCopy){chats.set(priorCopy.id,{...mergeContactMemory(priorCopy,chat,priorCopy.messages),id:priorCopy.id,title:priorCopy.title});if(active===chat.id)active=priorCopy.id;continue;}
 
   const copy={...chat,id:newId(),conflictOf:chat.id,title:chat.title.slice(0,24)+'（本机副本）'};if(chats.has(copy.id))throw new Error('生成对话编号失败，请重试。');chats.set(copy.id,copy);copies++;if(active===chat.id)active=copy.id;
@@ -57,7 +57,12 @@ export function mergeWorkspaces(remote,local,{newId=()=>crypto.randomUUID()}={})
  for(const item of device.favorites){
   const prior=favorites.get(item.id);
   if(!prior)favorites.set(item.id,item);
-  else if(JSON.stringify(prior)!==JSON.stringify(item)){const copy={...item,id:newId(),label:item.label.slice(0,94)+'（本机副本）'};favorites.set(copy.id,copy);copies++;}
+  else if(JSON.stringify(prior)!==JSON.stringify(item)){
+   const label=item.label.slice(0,94)+'（本机副本）';
+   if([...favorites.values()].some(copy=>copy.id!==item.id&&copy.label===label&&['text','name','source'].every(key=>copy[key]===item[key])))continue;
+   const id=newId();if(favorites.has(id)||deletedFavoriteIds.includes(id))throw new Error('生成收藏编号失败，请重试。');
+   favorites.set(id,{...item,id,label});copies++;
+  }
  }
  for(const id of deletedFavoriteIds)favorites.delete(id);
  if(chats.size>15||favorites.size>300)throw new Error('两边的记录超过容量，已停止自动合并。可取消“保留聊天”后连接，先导出需要的内容。');

@@ -24,8 +24,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.hanbin.xianwai</string>
 <key>CFBundleName</key><string>弦外</string>
 <key>CFBundleDisplayName</key><string>弦外</string>
-<key>CFBundleVersion</key><string>16</string>
-<key>CFBundleShortVersionString</key><string>0.7.2</string>
+<key>CFBundleVersion</key><string>17</string>
+<key>CFBundleShortVersionString</key><string>0.7.3</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>app-icon.png</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
