@@ -18,7 +18,7 @@ test('a valid file preserves multiline Chinese text and is applied once',async()
 });
 test('file failures and oversized files preserve the current input and report only the current error',async()=>{
  const h=fileRead(),reading=h.read();h.work.reject(new Error('disk error'));assert.equal(await reading,false);assert.equal(h.input.value,'原导入内容');assert.match(h.errors[0],/无法读取/);
- let reads=0;const errors=[];assert.equal(await readTranscriptFile({size:500001,text:()=>reads++},{isCurrent:()=>true,accept:()=>assert.fail('oversized import'),failed:error=>errors.push(error)}),false);assert.equal(reads,0);assert.match(errors[0],/500 KB/);
+ let reads=0;const errors=[];assert.equal(await readTranscriptFile({size:8000001,text:()=>reads++},{isCurrent:()=>true,accept:()=>assert.fail('oversized import'),failed:error=>errors.push(error)}),false);assert.equal(reads,0);assert.match(errors[0],/8 MB/);
 });
 function lifecycle(){
  const documentTarget=new EventTarget(),windowTarget=new EventTarget(),posted=[];documentTarget.hidden=false;

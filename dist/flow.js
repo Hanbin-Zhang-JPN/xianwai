@@ -1,4 +1,4 @@
-import {validateMessages} from './core.js';
+import {validateMessages,LIMITS} from './core.js';
 
 export const TONES = [
   {id: 'warm', label: '温柔一点'},
@@ -8,24 +8,22 @@ export const TONES = [
 
 // Only compare screenshot boundaries. Repeated text inside a screenshot is kept.
 export function boundaryOverlap(previous, incoming) {
-  const max = Math.min(previous.length, incoming.length);
-  for (let length = max; length >= 2; length--) {
-    const tail = previous.slice(-length), head = incoming.slice(0, length);
-    if (tail.reduce((sum, row) => sum + row.text.trim().length, 0) < 10) continue;
-    if (tail.every((row, index) => row.role === head[index].role && row.text.trim() === head[index].text.trim())) return length;
-  }
-  return 0;
+  const max=Math.min(previous.length,incoming.length);if(max<2)return 0;
+  const key=row=>JSON.stringify([row.role,row.text.trim()]),pattern=incoming.slice(0,max).map(key),prefix=new Array(max).fill(0),chars=[0];
+  for(let i=0;i<max;i++){chars.push(chars.at(-1)+incoming[i].text.trim().length);if(!i)continue;let j=prefix[i-1];while(j&&pattern[i]!==pattern[j])j=prefix[j-1];if(pattern[i]===pattern[j])j++;prefix[i]=j;}
+  let matched=0;for(const row of previous.slice(-max)){const value=key(row);while(matched&&(matched===max||pattern[matched]!==value))matched=prefix[matched-1];if(pattern[matched]===value)matched++;}
+  while(matched>=2){if(chars[matched]>=10)return matched;matched=prefix[matched-1];}return 0;
 }
 
-export function combineScreenshotBatches(batches, removeOverlap = true) {
+export function combineScreenshotBatches(batches, removeOverlap = true, limits=LIMITS) {
   let messages = [], overlapCount = 0;
   for (const batch of batches) {
-    validateMessages(batch);
+    validateMessages(batch,limits);
     const overlap = boundaryOverlap(messages, batch);
     overlapCount += overlap;
     messages = messages.concat(batch.slice(removeOverlap ? overlap : 0));
   }
-  validateMessages(messages);
+  validateMessages(messages,limits);
   return {messages, overlapCount};
 }
 

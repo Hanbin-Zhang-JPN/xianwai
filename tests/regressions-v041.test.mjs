@@ -14,7 +14,7 @@ test('undo retains the exact original message after that sent message has itself
 });
 test('an over-capacity transcript replacement fails without changing the previous valid library',()=>{
  const workspace=fixture(),chat=workspace.chats[0];chat.messages=Array.from({length:200},(_,i)=>({id:'old-'+i,role:'partner',text:'旧'.repeat(2000),createdAt:0}));analyze(chat);
- const before=JSON.stringify(chat),next=Array.from({length:220},(_,i)=>({id:'new-'+i,role:'partner',text:'新'.repeat(2000),createdAt:1000}));
+ const before=JSON.stringify(chat),next=Array.from({length:LIBRARY_LIMITS.total/2000-30},(_,i)=>({id:'new-'+i,role:'partner',text:'新'.repeat(2000),createdAt:1000}));
  assert.throws(()=>replaceContactMessages(chat,next,2000),/容量/);assert.equal(JSON.stringify(chat),before);assert.doesNotThrow(()=>normalizeWorkspace(workspace));
 });
 test('unrelated folder changes cannot replace a newer message composer with an old empty input',()=>{
@@ -67,7 +67,7 @@ test('library exports cannot be accidentally interpreted as chat messages',()=>{
  assert.throws(()=>parseTranscript(JSON.stringify({format:'xianwai-contact',contact:fixture().chats[0]})),/导出文件/);
  assert.deepEqual(parseTranscript(JSON.stringify({messages:[{role:'partner',text:'你好'}]})),[{role:'partner',text:'你好'}]);
 });
-test('a newer unsupported workspace schema is preserved by refusing to downgrade it',()=>{assert.throws(()=>normalizeWorkspace({...fixture(),schemaVersion:6}),/版本较新/);});
+test('a newer unsupported workspace schema is preserved by refusing to downgrade it',()=>{assert.throws(()=>normalizeWorkspace({...fixture(),schemaVersion:7}),/版本较新/);});
 
 test('replacing a current message cannot change saved evidence under the same message identifier',()=>{
  const workspace=fixture(),chat=workspace.chats[0];analyze(chat);const before=JSON.stringify(chat);

@@ -1,3 +1,4 @@
+import {normalizeContextInfo} from '../dist/history-context.js';
 import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
@@ -39,17 +40,17 @@ const server=http.createServer(async(req,res)=>{
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
   if(stopping){send(res,503,{error:'Mac 服务正在关闭，请重新连接后再试。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.5.3',workspaceSchema:5,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.6.0',workspaceSchema:6,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
     if(req.method==='DELETE'){const input=await body(req);const value=await workspaceStore.clear(input?.baseRevision);send(res,200,{deleted:true,revision:value.revision});return;}
-    if(req.method==='POST'){const input=await body(req,10000000);const value=await workspaceStore.save(input,input?.baseRevision);send(res,200,{saved:true,revision:value.revision});return;}
+    if(req.method==='POST'){const input=await body(req,40000000);const value=await workspaceStore.save(input,input?.baseRevision);send(res,200,{saved:true,revision:value.revision});return;}
    }
    if(url.pathname==='/api/analyze'&&req.method==='POST'){
     await refreshAuth();if(!ready){send(res,503,{error:'请先在这台 Mac 的 ChatGPT 应用中登录 Codex。'});return;}
     const input=await body(req);if(stopping)throw Object.assign(new Error('Mac 服务正在关闭。'),{status:503});if(!input||typeof input!=='object')throw new Error('分析请求格式不正确。');contextFor(input.messages,input.targetIndex);
     if(!['warm','honest','brief'].includes(input.tone)||typeof input.note!=='string'||input.note.length>2000||(input.style!==undefined&&(typeof input.style!=='string'||input.style.length>1000)))throw new Error('语气或背景格式不正确。');
-    normalizeReplyOptions(input.replyOptions);
+    normalizeReplyOptions(input.replyOptions);normalizeContextInfo(input.contextInfo,input.targetIndex+1);
     for(const [id,job] of jobs)if(Date.now()-job.created>600000)jobs.delete(id);
     const id=input.requestId||randomUUID();
     if(typeof id!=='string'||!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');

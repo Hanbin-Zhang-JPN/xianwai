@@ -1,18 +1,19 @@
 export const LIMITS = { messages: 300, text: 2000, total: 80000 };
-export function parseTranscript(raw) {
+export const IMPORT_LIMITS={messages:10000,text:2000,total:2000000,preserveDates:true};
+export function parseTranscript(raw,limits=LIMITS) {
  const text = raw.trim();
  if (!text) throw new Error('先粘贴一段聊天，再开始整理。');
- if (text.length > LIMITS.total) throw new Error('这段聊天超过 80,000 字，请分段导入。');
+ if (text.length > limits.total*(limits.preserveDates?2:1)) throw new Error('这段聊天超过本批容量，请分段导入。');
  if (text.startsWith('{')) {
   let value;try{value=JSON.parse(text);}catch{throw new Error('JSON 格式不正确，请检查括号和引号。');}
   if(value&&['xianwai-library','xianwai-contact'].includes(value.format))throw new Error('这是联系人资料库导出文件，包含历史分析，不能作为聊天文本导入。请保留完整原文件；普通聊天 JSON 应使用消息数组。');
-  if(value&&Array.isArray(value.messages))return validateMessages(value.messages);
+  if(value&&Array.isArray(value.messages))return validateMessages(value.messages,limits);
   throw new Error('聊天 JSON 应为消息数组，或包含 messages 数组；若这是对方的原话，请在前面加“对方：”。');
  }
  if (text.startsWith('[')) {
   let rows;
   try { rows = JSON.parse(text); } catch { throw new Error('JSON 格式不正确，请检查括号和引号。'); }
-  return validateMessages(rows);
+  return validateMessages(rows,limits);
  }
  const rows = []; let unknown = 0;
  for (const line of text.split(/\r?\n/)) {
@@ -22,20 +23,29 @@ export function parseTranscript(raw) {
   else if (rows.length && /^\s+/.test(line)) rows.at(-1).text += '\n' + line.trim();
   else { rows.push({ role: 'partner', text: line.trim(), uncertain: true }); unknown++; }
  }
- const valid = validateMessages(rows);
+ const valid = validateMessages(rows,limits);
  return valid.map((m,i) => ({...m, uncertain: !!rows[i].uncertain}));
 }
-export function validateMessages(rows) {
+function parseSourceTime(source,index){
+ let value=source;
+ if(typeof source==='string'){
+  const iso=/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(source),day=iso?new Date(source.slice(0,10)+'T00:00:00Z'):null;
+  value=iso&&Number.isFinite(day.getTime())&&day.toISOString().slice(0,10)===source.slice(0,10)?Date.parse(source):NaN;
+ }
+ if(!Number.isSafeInteger(value)||value<0||value>8640000000000000)throw new Error(`第 ${index+1} 条日期不正确，请使用毫秒时间戳或带时区的 ISO 日期。`);
+ return value;
+}
+export function validateMessages(rows,limits=LIMITS) {
  if (!Array.isArray(rows) || !rows.length) throw new Error('至少需要一条聊天消息。');
- if (rows.length > LIMITS.messages) throw new Error('每次最多导入 300 条消息，请分段整理。');
+ if (rows.length > limits.messages) throw new Error(`每次最多导入 ${limits.messages} 条消息，请分段整理。`);
  let total = 0;
  const result = rows.map((row,i) => {
   if (!row || !['me','partner'].includes(row.role) || typeof row.text !== 'string' || !row.text.trim()) throw new Error(`第 ${i+1} 条消息需要选择发送者并填写文字。`);
   const text = row.text.trim(); total += text.length;
-  if (text.length > LIMITS.text) throw new Error(`第 ${i+1} 条超过 2,000 字，请拆成多条消息。`);
-  return {role:row.role, text};
+  if (text.length > limits.text) throw new Error(`第 ${i+1} 条超过 2,000 字，请拆成多条消息。`);
+  const result={role:row.role,text};if(limits.preserveDates&&row.sentAt!==undefined){const value=parseSourceTime(row.sentAt,i);if(value)result.sentAt=value;}return result;
  });
- if (total > LIMITS.total) throw new Error('聊天总字数不能超过 80,000 字。');
+ if (total > limits.total) throw new Error(`聊天总字数不能超过 ${limits.total.toLocaleString('en-US')} 字。`);
  return result;
 }
 export function contextFor(messages, targetIndex) {

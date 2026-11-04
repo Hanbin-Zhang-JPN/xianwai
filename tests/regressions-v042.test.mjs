@@ -64,7 +64,7 @@ test('malformed or unsupported JSON objects do not silently become partner messa
 test('an unwrapped upgraded backup refuses an old writer without changing its source bytes',async t=>{
  const directory=await mkdtemp(path.join(os.tmpdir(),'xianwai-042-'));t.after(()=>rm(directory,{recursive:true,force:true}));const store=new WorkspaceStore(directory),workspace=fixture(),raw=JSON.stringify(workspace);await writeFile(store.file,raw);
  await assert.rejects(store.save({...workspace,schemaVersion:3},0),{status:409});assert.equal(await readFile(store.file,'utf8'),raw);
- await store.save(workspace,0);assert.equal((await store.read()).workspace.schemaVersion,5);
+ await store.save(workspace,0);assert.equal((await store.read()).workspace.schemaVersion,6);
 });
 test('a conflict copy with a long truncated title is reused on the next reconnect',()=>{
  const mac=fixture(),phone=fixture();phone.chats[0].title=mac.chats[0].title='长'.repeat(30);phone.chats[0].messages[0].text='本机另一段对话';
