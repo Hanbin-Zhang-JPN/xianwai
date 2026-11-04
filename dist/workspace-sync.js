@@ -1,5 +1,15 @@
 import {normalizeWorkspace} from './workspace.js';
 
+export function bindWorkspaceLifecycle({documentTarget=document,windowTarget=window,save,flush,resume}){
+ const leave=()=>{save();void flush();};
+ const visible=()=>{if(!documentTarget.hidden)resume();};
+ const visibility=()=>{if(documentTarget.hidden)leave();else visible();};
+ documentTarget.addEventListener('visibilitychange',visibility);
+ windowTarget.addEventListener('pagehide',leave);
+ windowTarget.addEventListener('pageshow',visible);
+ return ()=>{documentTarget.removeEventListener('visibilitychange',visibility);windowTarget.removeEventListener('pagehide',leave);windowTarget.removeEventListener('pageshow',visible);};
+}
+
 // Use AbortController directly so older iPhone WebKit versions need no AbortSignal.any.
 export async function withRequestTimeout(operation,signal,milliseconds=12000){
  const controller=new AbortController(),abort=()=>controller.abort();

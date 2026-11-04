@@ -1,5 +1,5 @@
 import {analysisClient} from './analysis-client.js';
-import {createWorkspaceSync,withRequestTimeout} from './workspace-sync.js';
+import {createWorkspaceSync,withRequestTimeout,bindWorkspaceLifecycle} from './workspace-sync.js';
 import {mergeWorkspaces} from './workspace.js';
 import {validateMessages} from './core.js';
 import {safeStorage,parsePairLink,probeConnection,connectionError} from './pairing.js';
@@ -139,9 +139,8 @@ export function startCompanion(api){
  if(hash.has('key')){try{const pair=parsePair(location.href);pairingModal(pair);}catch(error){toast(error.message);}}
  else{let saved,remember=true,savedLive=true;try{const local=safeStorage.read('localStorage','xianwai-connection-v1');remember=!!local;saved=JSON.parse(local||safeStorage.read('sessionStorage','xianwai-connection-v1')||'null');savedLive=saved?.live!==false;if(saved)saved=parsePair('https://pair.invalid/#bridge='+encodeURIComponent(saved.endpoint)+'&key='+encodeURIComponent(saved.token));}catch{saved=null;}if(saved)void connect(saved,{remember,save:getState().persist,live:savedLive});}
  const checkConnection=()=>heartbeat.check();
- document.addEventListener('visibilitychange',()=>{if(!document.hidden)void checkConnection();else void sync.flush();});
+ bindWorkspaceLifecycle({save:api.persistNow,flush:()=>sync.flush(),resume:()=>void checkConnection()});
  window.addEventListener('online',()=>void checkConnection());
- window.addEventListener('pagehide',()=>void sync.flush());
  setInterval(()=>void checkConnection(),20000);
  draw();
 }
