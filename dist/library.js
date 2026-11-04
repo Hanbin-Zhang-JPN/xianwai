@@ -103,9 +103,9 @@ export function contactMessagePool(...chats){
  const pool=new Map();for(const chat of chats)for(const message of [...(chat.archive||[]),...chat.messages]){const prior=pool.get(message.id);if(prior&&(prior.role!==message.role||prior.text!==message.text||(prior.sentAt||0)!==(message.sentAt||0)))throw new Error('同一原文编号对应不同内容，已停止合并。请先导出两边的资料库。');if(!prior||message.createdAt>prior.createdAt)pool.set(message.id,message);}return pool;
 }
 export function recordContext(chat,record){const pool=new Map([...(chat.archive||[]),...chat.messages].map(message=>[message.id,message]));return record.contextIds.map(id=>pool.get(id));}
-export function saveAnalysisRecord(chat,context,result,{tone='warm',now=Date.now(),newId=()=>crypto.randomUUID(),replyOptions,note=chat.note||'',style=chat.style||''}={}){
+export function saveAnalysisRecord(chat,context,result,{tone='warm',now=Date.now(),newId=()=>crypto.randomUUID(),replyOptions,note=chat.note||'',style=chat.style||'',forceNew=false}={}){
  const options=normalizeReplyOptions(replyOptions),contextInfo=normalizeContextInfo(context.info,context.messages.length),relationshipContext=normalizeRelationshipContext(context.relationshipContext,context.messages.length),key=libraryCanonical([context.messages.map(message=>message.id),result,note,style,options,contextInfo,relationshipContext]);
- let record=(chat.analyses||[]).find(record=>libraryCanonical([record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null,record.relationshipContext||null])===key);
+ let record=!forceNew&&(chat.analyses||[]).find(record=>libraryCanonical([record.contextIds,record.result,record.note,record.style,normalizeReplyOptions(record.replyOptions),record.contextInfo||null,record.relationshipContext||null])===key);
  if(!record){
   if((chat.analyses||[]).length>=LIBRARY_LIMITS.records)throw new Error('这位联系人的分析记录已满 100 条。请先导出或删除部分记录。');
   record={id:newId(),createdAt:now,updatedAt:now,targetId:context.messages.at(-1).id,contextIds:context.messages.map(message=>message.id),contextInfo,relationshipContext,result:structuredClone(result),tone,drafts:{},note,style,replyOptions:options};

@@ -42,7 +42,7 @@ const server=http.createServer(async(req,res)=>{
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
   if(stopping||clearingBackup){send(res,503,{error:'Mac 服务正在关闭，请重新连接后再试。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.7.1',workspaceSchema:8,replyVerification:true,historyReview:true,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.7.2',workspaceSchema:8,replyVerification:true,historyReview:true,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
     if(req.method==='DELETE'){const input=await body(req);clearingBackup=true;try{const value=await workspaceStore.clear(input?.baseRevision);taskEpoch++;const pending=[...jobs.values(),...ocrTasks];for(const task of pending)task.controller?.abort();await Promise.allSettled(pending.map(task=>task.finished));jobs.clear();await rm(reviewRunner.directory,{recursive:true,force:true});send(res,200,{deleted:true,revision:value.revision});}finally{clearingBackup=false;}return;}

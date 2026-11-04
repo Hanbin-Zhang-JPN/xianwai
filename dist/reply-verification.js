@@ -25,3 +25,5 @@ export function preferredVerifiedTone(analysis,fallback='warm'){
  if(!analysis.verification||analysis.verification.replies.find(item=>item.tone===preferred)?.status==='ready')return preferred;
  return analysis.verification.replies.find(item=>item.status==='ready')?.tone||preferred;
 }
+
+export function isReplySourceCurrent(record,chat,now=Date.now()){if(!record)return false;const age=now-record.createdAt;return record.targetId===chat.messages.at(-1)?.id&&age>=0&&age<=86400000&&new Date(now).toDateString()===new Date(record.createdAt).toDateString()&&(record.note||'')===(chat.note||'')&&(record.style||'')===(chat.style||'');}

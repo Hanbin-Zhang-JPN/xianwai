@@ -9,7 +9,7 @@ export const TONES = [
 // Only compare screenshot boundaries. Repeated text inside a screenshot is kept.
 export function boundaryOverlap(previous, incoming) {
   const max=Math.min(previous.length,incoming.length);if(max<2)return 0;
-  const key=row=>JSON.stringify([row.role,row.text.trim()]),pattern=incoming.slice(0,max).map(key),prefix=new Array(max).fill(0),chars=[0];
+  const key=row=>JSON.stringify([row.role,row.text.trim(),row.sentAt||0]),pattern=incoming.slice(0,max).map(key),prefix=new Array(max).fill(0),chars=[0];
   for(let i=0;i<max;i++){chars.push(chars.at(-1)+incoming[i].text.trim().length);if(!i)continue;let j=prefix[i-1];while(j&&pattern[i]!==pattern[j])j=prefix[j-1];if(pattern[i]===pattern[j])j++;prefix[i]=j;}
   let matched=0;for(const row of previous.slice(-max)){const value=key(row);while(matched&&(matched===max||pattern[matched]!==value))matched=prefix[matched-1];if(pattern[matched]===value)matched++;}
   while(matched>=2){if(chars[matched]>=10)return matched;matched=prefix[matched-1];}return 0;
@@ -64,3 +64,6 @@ export function replyForTone(analysis, tone) {
 }
 
 export function canUndoRecord(record,chat){return !!record&&record.chatId===chat.id&&record.snapshot===JSON.stringify(chat.messages);}
+
+// Keep source dates when returning from review to the editable import field.
+export function reviewTranscript(rows){return rows.some(row=>row.sentAt||/[\r\n]/.test(row.text))?JSON.stringify(rows.map(({role,text,sentAt})=>({role,text,...(sentAt?{sentAt}:{})})),null,2):rows.map(row=>(row.role==='me'?'我':'对方')+'：'+row.text).join('\n');}

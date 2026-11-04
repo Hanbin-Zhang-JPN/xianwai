@@ -36,7 +36,7 @@ export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInte
   return request.cleanup;
  }
  async function cancel(){const old=active;active=null;cancellation=Promise.all([cancellation,stop(old)]).then(()=>{});await cancellation;}
- async function request({endpoint,token,input}){
+ async function request({endpoint,token,input,fresh=false}){
   const old=active;
   const current={id:crypto.randomUUID(),controller:new AbortController(),base:endpoint.replace(/\/$/,''),token,submitted:false};
   active=current;
@@ -47,7 +47,8 @@ export function createAnalysisClient({fetcher=(...args)=>fetch(...args),pollInte
    await cancellation;
    if(current.controller.signal.aborted||active!==current)throw aborted();
    const key=JSON.stringify({base:current.base,token,input});
-   if(cache.has(key)){const entry=cache.get(key),age=now()-entry.savedAt;if(age>=0&&age<=cacheTTL){complete=true;return entry.result;}cache.delete(key);}
+   if(fresh)cache.delete(key);
+   if(cache.has(key)){const entry=cache.get(key),time=now(),age=time-entry.savedAt;if(age>=0&&age<=cacheTTL&&new Date(time).toDateString()===new Date(entry.savedAt).toDateString()){complete=true;return entry.result;}cache.delete(key);}
    const headers={'Content-Type':'application/json',Authorization:'Bearer '+token};
    current.submitted=true;
    let response=await fetcher(current.base+'/api/analyze',{method:'POST',headers,body:JSON.stringify({...input,requestId:current.id}),signal:current.controller.signal});
