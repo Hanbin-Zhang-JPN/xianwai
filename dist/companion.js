@@ -3,7 +3,7 @@ import {createWorkspaceSync,withRequestTimeout,bindWorkspaceLifecycle} from './w
 import {mergeWorkspaces} from './workspace.js';
 import {validateMessages} from './core.js';
 import {safeStorage,parsePairLink,probeConnection,connectionError} from './pairing.js';
-import {pasteClipboard} from './clipboard.js';
+import {pasteClipboard,guardClipboardDialog} from './clipboard.js';
 import {createConnectionMonitor} from './connection-monitor.js';
 
 export const requestAnalysis=async options=>{try{return await analysisClient.request(options);}catch(error){if(error.status===401)error.message=connectionError(error);if(error.status===401||error instanceof TypeError||error.name==='TimeoutError')document.dispatchEvent(new CustomEvent('xianwai-connection-error',{detail:connectionError(error)}));throw error;}};
@@ -106,8 +106,8 @@ export function startCompanion(api){
  window.xianwaiReceiveOCR=(rows,id)=>{const task=nativeChat;if(!task||id!==task.id)return;nativeChat=null;if(getState().active===task.chatId&&contextVersion===task.version)nativeReceive?.(rows);else toast('对话已切换，本次截图未导入，请重新选择。');};
  window.xianwaiOCRCancelled=id=>{if(nativeChat?.id===id)nativeChat=null;};
  async function paste(){
-  const s=getState(),chatId=s.active,version=contextVersion,chat=s.chats.find(chat=>chat.id===chatId),composer=JSON.stringify(chat?.composer);
-  await pasteClipboard({isCurrent:()=>getState().active===chatId&&contextVersion===version&&JSON.stringify(getState().chats.find(chat=>chat.id===chatId)?.composer)===composer,
+  const s=getState(),chatId=s.active,page=s.page,version=contextVersion,chat=s.chats.find(chat=>chat.id===chatId),composer=JSON.stringify(chat?.composer);
+  await pasteClipboard({isCurrent:guardClipboardDialog(()=>getState().active===chatId&&getState().page===page&&contextVersion===version&&JSON.stringify(getState().chats.find(chat=>chat.id===chatId)?.composer)===composer,()=>document.querySelector('#modal-root .modal')),
    accept:text=>{if(text.length>2000||(/^(我|自己|对方|她|他|女友|老婆|伴侣|me|partner)\s*[:：]/im.test(text)&&text.includes('\n')))api.openImport(text);else api.quickPaste(text);},
    unavailable:()=>{api.quickPaste();toast('在下方输入框长按粘贴，原有输入已保留。');},empty:()=>toast('剪贴板没有文字，原有输入已保留。')});
  }

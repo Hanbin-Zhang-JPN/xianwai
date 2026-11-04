@@ -42,7 +42,7 @@ const server=http.createServer(async(req,res)=>{
   if(!equal(req.headers.authorization||'','Bearer '+token)){send(res,401,{error:'这台设备尚未配对，请用 Mac 上的二维码重新连接。'});return;}
   if(stopping||clearingBackup){send(res,503,{error:'Mac 服务正在关闭，请重新连接后再试。'});return;}
   try{
-   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.7.3',workspaceSchema:8,replyVerification:true,historyReview:true,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
+   if(url.pathname==='/api/health'&&req.method==='GET'){await refreshAuth();send(res,200,{version:'0.7.4',workspaceSchema:8,replyVerification:true,historyReview:true,ready,mode:ready?'ai':'unavailable',provider:'codex',ocr:!!process.env.XIANWAI_OCR,async:true});return;}
    if(url.pathname==='/api/workspace'){
     if(req.method==='GET'){send(res,200,await workspaceStore.read());return;}
     if(req.method==='DELETE'){const input=await body(req);clearingBackup=true;try{const value=await workspaceStore.clear(input?.baseRevision);taskEpoch++;const pending=[...jobs.values(),...ocrTasks];for(const task of pending)task.controller?.abort();await Promise.allSettled(pending.map(task=>task.finished));jobs.clear();await rm(reviewRunner.directory,{recursive:true,force:true});send(res,200,{deleted:true,revision:value.revision});}finally{clearingBackup=false;}return;}
@@ -80,8 +80,9 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname.startsWith('/api/jobs/')){const id=url.pathname.slice(10);if(!/^[-a-zA-Z0-9]{1,100}$/.test(id))throw new Error('分析任务编号不正确。');const job=jobs.get(id);if(req.method==='DELETE'){if(job){job.controller?.abort();await job.finished;job.status='cancelled';delete job.result;}else{jobs.set(id,{created:Date.now(),status:'cancelled'});pruneJobs(jobs);}send(res,200,{status:'cancelled'});return;}if(!job){send(res,404,{error:'这次分析已过期，请重新选择消息。'});return;}if(req.method==='GET'){send(res,200,{status:job.status,...(job.progress?{progress:job.progress}:{}),...(job.sourceHash?{sourceHash:job.sourceHash}:{}),...(job.result?{result:job.result}:{}),...(job.error?{error:job.error}:{})});return;}}
    if(url.pathname==='/api/ocr'&&req.method==='POST'){
     if(!process.env.XIANWAI_OCR){send(res,503,{error:'本机截图识别尚未准备好。'});return;}
+    const epoch=taskEpoch;
     const input=await body(req,6500000),match=typeof input?.dataUrl==='string'&&input.dataUrl.match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/);
-    if(stopping)throw Object.assign(new Error('Mac 服务正在关闭。'),{status:503});
+    if(stopping||clearingBackup||epoch!==taskEpoch)throw Object.assign(new Error('资料或服务已变更，截图未继续识别，请重新选择。'),{status:503});
     if(!match)throw new Error('请上传 PNG 或 JPG 截图。');
     if(ocrActive>=2){send(res,429,{error:'已有截图正在识别，请稍候再试。'});return;}ocrActive++;
     const ocrController=new AbortController(),abortOCR=()=>{if(!res.writableEnded)ocrController.abort();};res.once('close',abortOCR);

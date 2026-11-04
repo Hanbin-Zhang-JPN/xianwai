@@ -18,6 +18,7 @@ export function createHistoryReviewClient({fetcher=(...args)=>fetch(...args),get
   try{while(valid(task)){
    known={...value,pair:task.pair};onUpdate(value);
    if(value.status==='completed'){onComplete(value.result,task.chatId);return;}
+   if(value.status==='failed')throw new Error(typeof value.error==='string'&&value.error.trim()?value.error:'全量历史梳理未完成，请重试；已有档案仍保留。');
    if(value.status!=='running')return;
    await sleep(task.controller.signal);if(!valid(task))return;
    value={...await call(task.pair,'/api/jobs/'+encodeURIComponent(task.jobId),{},task.controller.signal),jobId:task.jobId,chatId:task.chatId};
